@@ -15,8 +15,8 @@ psycopg2-binary>=2.9.9
 # Email
 sendgrid>=6.11.0
 
-# Sports data
-sportsreference>=0.6.1
+# Sports data (latest available is 0.5.2)
+sportsreference>=0.5.0
 
 # Modal (for local dev / deployment)
 modal>=0.64.0
