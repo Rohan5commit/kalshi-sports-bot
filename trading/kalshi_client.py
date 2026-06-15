@@ -1,7 +1,7 @@
 """
 trading/kalshi_client.py — Kalshi REST API wrapper.
-Uses demo account by default; all credentials come from Modal Secrets.
-Implements retry logic with exponential backoff.
+Market data endpoints are public (no auth).
+Trading endpoints require KALSHI_API_KEY from Modal Secrets.
 """
 import os
 import time
@@ -15,27 +15,13 @@ from db.supabase_client import log_error
 BASE_URL = KALSHI_DEMO_BASE if KALSHI_USE_DEMO else KALSHI_PROD_BASE
 
 
-def _get_headers() -> dict:
-    api_key = os.environ["KALSHI_API_KEY"]
-    return {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
-
-def _request(method: str, endpoint: str, **kwargs) -> Optional[dict]:
-    """Generic HTTP request with retry logic."""
+def _public_request(method: str, endpoint: str, **kwargs) -> Optional[dict]:
+    """Public market data request — no auth required."""
     url = f"{BASE_URL}{endpoint}"
     last_exc = None
     for attempt in range(MAX_RETRIES):
         try:
-            resp = requests.request(
-                method,
-                url,
-                headers=_get_headers(),
-                timeout=20,
-                **kwargs,
-            )
+            resp = requests.request(method, url, timeout=20, **kwargs)
             resp.raise_for_status()
             return resp.json()
         except Exception as exc:
@@ -43,103 +29,101 @@ def _request(method: str, endpoint: str, **kwargs) -> Optional[dict]:
             if attempt < MAX_RETRIES - 1:
                 time.sleep(BACKOFF_BASE ** attempt)
     log_error(
-        context=f"kalshi_client._request {method} {endpoint}",
+        context=f"kalshi_client._public_request {method} {endpoint}",
         error_msg=str(last_exc),
         tb=traceback.format_exc(),
     )
     return None
 
 
-# ── Market data ────────────────────────────────────────────────────────────────
+def _authed_request(method: str, endpoint: str, **kwargs) -> Optional[dict]:
+    """Authenticated request for trading endpoints."""
+    url = f"{BASE_URL}{endpoint}"
+    headers = {
+        "Authorization": f"Bearer {os.environ['KALSHI_API_KEY']}",
+        "Content-Type": "application/json",
+    }
+    last_exc = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            resp = requests.request(method, url, headers=headers, timeout=20, **kwargs)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as exc:
+            last_exc = exc
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(BACKOFF_BASE ** attempt)
+    log_error(
+        context=f"kalshi_client._authed_request {method} {endpoint}",
+        error_msg=str(last_exc),
+        tb=traceback.format_exc(),
+    )
+    return None
 
-def get_markets(sport_tag: str = None, status: str = "open", limit: int = 100) -> list:
-    """
-    Fetch open markets, optionally filtered by sport tag.
-    Returns list of market dicts.
-    """
-    params = {"status": status, "limit": limit}
-    if sport_tag:
-        params["series_ticker"] = sport_tag
-    data = _request("GET", "/markets", params=params)
-    if data is None:
-        return []
-    return data.get("markets", [])
+
+# ── Public market data ─────────────────────────────────────────────────────────
+
+def get_markets(status: str = "open", limit: int = 200) -> list:
+    """Fetch open sports markets."""
+    data = _public_request("GET", "/markets", params={"status": status, "category": "sports", "limit": limit})
+    return (data or {}).get("markets", [])
 
 
 def get_market(market_ticker: str) -> Optional[dict]:
     """Fetch a single market by ticker."""
-    return _request("GET", f"/markets/{market_ticker}")
+    data = _public_request("GET", f"/markets/{market_ticker}")
+    return (data or {}).get("market")
 
 
 def get_market_orderbook(market_ticker: str) -> Optional[dict]:
-    """Fetch order book for a market."""
-    return _request("GET", f"/markets/{market_ticker}/orderbook")
+    """Fetch orderbook for precise implied probability."""
+    return _public_request("GET", f"/markets/{market_ticker}/orderbook")
+
+
+def get_implied_probability(market: dict) -> float:
+    """
+    Implied probability from Kalshi yes_ask price.
+    yes_ask is the price to buy Yes, in cents (0-100).
+    """
+    yes_ask = market.get("yes_ask") or market.get("yes_price") or 50
+    return float(yes_ask) / 100.0
 
 
 def search_sports_markets(home_team: str, away_team: str, sport: str) -> list:
-    """
-    Search for Kalshi markets matching a specific game matchup.
-    Looks for markets containing team names in the title.
-    """
+    """Search open sports markets for a specific game matchup."""
     all_markets = get_markets(limit=200)
-    if not all_markets:
-        return []
-
-    sport_lower = sport.lower()
     home_lower = home_team.lower()
     away_lower = away_team.lower()
-
+    sport_lower = sport.lower()
     matches = []
     for market in all_markets:
-        title = (market.get("title") or "").lower()
-        subtitle = (market.get("subtitle") or "").lower()
-        combined = title + " " + subtitle
+        combined = ((market.get("title") or "") + " " + (market.get("subtitle") or "")).lower()
         if (home_lower in combined or away_lower in combined) and sport_lower in combined:
             matches.append(market)
     return matches
 
 
-def get_implied_probability(market: dict) -> float:
-    """
-    Extract the implied probability from a Kalshi market's yes_price.
-    yes_price is in cents (0–100).
-    """
-    yes_price = market.get("yes_price") or market.get("yes_ask") or 50
-    return float(yes_price) / 100.0
-
-
-# ── Account and balance ────────────────────────────────────────────────────────
+# ── Authenticated trading endpoints ───────────────────────────────────────────
 
 def get_balance() -> float:
     """Return available balance in USD."""
-    data = _request("GET", "/portfolio/balance")
-    if not data:
-        return 0.0
-    # Balance returned in cents by Kalshi
-    return float(data.get("balance", 0)) / 100.0
+    data = _authed_request("GET", "/portfolio/balance")
+    return float((data or {}).get("balance", 0)) / 100.0
 
 
 def get_open_positions() -> list:
-    """Fetch open positions from the portfolio."""
-    data = _request("GET", "/portfolio/positions")
-    if not data:
-        return []
-    return data.get("market_positions", [])
+    data = _authed_request("GET", "/portfolio/positions")
+    return (data or {}).get("market_positions", [])
 
-
-# ── Order placement ────────────────────────────────────────────────────────────
 
 def place_order(
     market_ticker: str,
-    side: str,          # "yes" or "no"
-    count: int,         # number of contracts
-    price: int,         # in cents (1–99)
+    side: str,
+    count: int,
+    price: int,
     order_type: str = "limit",
 ) -> Optional[dict]:
-    """
-    Place a limit order on Kalshi demo.
-    Returns the order response dict, or None if the API is unreachable.
-    """
+    """Place a limit order on Kalshi demo. price in cents (1-99)."""
     payload = {
         "ticker": market_ticker,
         "action": "buy",
@@ -148,7 +132,7 @@ def place_order(
         "count": count,
         "yes_price": price if side == "yes" else 100 - price,
     }
-    result = _request("POST", "/portfolio/orders", json=payload)
+    result = _authed_request("POST", "/portfolio/orders", json=payload)
     if result is None:
         log_error(
             context=f"kalshi_client.place_order({market_ticker}, {side})",
@@ -159,21 +143,15 @@ def place_order(
 
 
 def usd_to_contracts(usd_amount: float, price_cents: int) -> int:
-    """
-    Convert a USD bet size to number of Kalshi contracts.
-    Each contract costs price_cents / 100 USD.
-    """
+    """Convert USD bet size to number of Kalshi contracts."""
     if price_cents <= 0:
         return 0
-    cost_per_contract = price_cents / 100.0
-    return max(1, int(usd_amount / cost_per_contract))
+    return max(1, int(usd_amount / (price_cents / 100.0)))
 
 
 def get_order_status(order_id: str) -> Optional[dict]:
-    """Fetch status of a specific order."""
-    return _request("GET", f"/portfolio/orders/{order_id}")
+    return _authed_request("GET", f"/portfolio/orders/{order_id}")
 
 
 def cancel_order(order_id: str) -> Optional[dict]:
-    """Cancel an open order."""
-    return _request("DELETE", f"/portfolio/orders/{order_id}")
+    return _authed_request("DELETE", f"/portfolio/orders/{order_id}")
