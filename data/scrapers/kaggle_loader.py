@@ -1,11 +1,11 @@
 """
 data/scrapers/kaggle_loader.py — Downloads Kaggle datasets into DataFrames.
-Requires KAGGLE_USERNAME and KAGGLE_KEY in Modal Secret kaggle-secret.
+Uses KAGGLE_API_TOKEN (new bearer token format, KGAT_...) from kaggle-secret.
 
 Datasets:
-  nathanlauga/nba-games            — NBA game logs 2003-2023
-  toddsteussie/nfl-play-statistics-dataset-2004-to-present — NFL play-by-play
-  wduckett/statcast-data-for-all-mlb-games-2022-23 — MLB Statcast
+  nathanlauga/nba-games
+  toddsteussie/nfl-play-statistics-dataset-2004-to-present
+  wduckett/statcast-data-for-all-mlb-games-2022-23
 """
 import io
 import os
@@ -24,8 +24,9 @@ NFL_DATASET = "toddsteussie/nfl-play-statistics-dataset-2004-to-present"
 MLB_DATASET = "wduckett/statcast-data-for-all-mlb-games-2022-23"
 
 
-def _auth():
-    return (os.environ["KAGGLE_USERNAME"], os.environ["KAGGLE_KEY"])
+def _headers() -> dict:
+    token = os.environ["KAGGLE_API_TOKEN"]
+    return {"Authorization": f"Bearer {token}"}
 
 
 def _download(dataset: str) -> dict:
@@ -34,7 +35,7 @@ def _download(dataset: str) -> dict:
     last_exc = None
     for attempt in range(MAX_RETRIES):
         try:
-            resp = requests.get(url, auth=_auth(), stream=True, timeout=180)
+            resp = requests.get(url, headers=_headers(), stream=True, timeout=300)
             resp.raise_for_status()
             z = zipfile.ZipFile(io.BytesIO(resp.content))
             return {
@@ -50,9 +51,7 @@ def _download(dataset: str) -> dict:
 
 
 def get_nba_games() -> pd.DataFrame:
-    """nathanlauga/nba-games — returns games DataFrame (game-level, not play-by-play)."""
     data = _download(NBA_DATASET)
-    # Dataset contains games.csv and games_details.csv
     key = next((k for k in data if "games" in k.lower() and "detail" not in k.lower()), None)
     if not key:
         key = next(iter(data), None)
@@ -62,7 +61,6 @@ def get_nba_games() -> pd.DataFrame:
 
 
 def get_nfl_pbp() -> pd.DataFrame:
-    """NFL play-by-play dataset."""
     data = _download(NFL_DATASET)
     key = next(iter(data), None)
     df = data[key] if key else pd.DataFrame()
@@ -71,7 +69,6 @@ def get_nfl_pbp() -> pd.DataFrame:
 
 
 def get_mlb_statcast() -> pd.DataFrame:
-    """MLB Statcast pitch-by-pitch dataset."""
     data = _download(MLB_DATASET)
     key = next(iter(data), None)
     df = data[key] if key else pd.DataFrame()
