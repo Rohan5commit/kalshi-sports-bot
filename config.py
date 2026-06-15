@@ -34,7 +34,6 @@ SECRET_KALSHI = "kalshi-secret"
 SECRET_SUPABASE = "supabase-secret"
 SECRET_SMTP = "smtp-secret"
 SECRET_API_SPORTS = "api-sports-secret"
-SECRET_ODDS_API = "odds-api-secret"
 SECRET_NEWS_API = "newsapi-secret"
 
 # Email report settings (SMTP)
@@ -43,7 +42,7 @@ REPORT_TO_EMAIL = "rohan.santhoshkumar1@gmail.com"
 SMTP_DEFAULT_HOST = "smtp.gmail.com"
 SMTP_DEFAULT_PORT = 587
 
-# Kalshi API base URLs
+# Kalshi API base URLs — market data is public, trading requires KALSHI_API_KEY
 KALSHI_DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2"
 KALSHI_PROD_BASE = "https://api.kalshi.co/trade-api/v2"
 KALSHI_USE_DEMO = True
@@ -59,15 +58,7 @@ ESPN_SPORT_PATHS = {
 # API-Sports base
 API_SPORTS_BASE = "https://v1.american-football.api-sports.io"
 
-# The Odds API
-ODDS_API_BASE = "https://api.the-odds-api.com/v4"
-ODDS_API_SPORTS = {
-    "NBA": "basketball_nba",
-    "NFL": "americanfootball_nfl",
-    "MLB": "baseball_mlb",
-}
-
-# Currents API (replaces NewsAPI)
+# Currents API (injury/lineup news)
 CURRENTS_API_BASE = "https://api.currentsapi.services/v1"
 
 # Sportsreference seasons map
