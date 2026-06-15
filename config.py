@@ -32,14 +32,16 @@ MODEL_VOLUME_NAME = "kalshi-bot-models"
 # Modal Secret names
 SECRET_KALSHI = "kalshi-secret"
 SECRET_SUPABASE = "supabase-secret"
-SECRET_SENDGRID = "sendgrid-secret"
+SECRET_SMTP = "smtp-secret"
 SECRET_API_SPORTS = "api-sports-secret"
 SECRET_ODDS_API = "odds-api-secret"
 SECRET_NEWS_API = "newsapi-secret"
 
-# Email report settings
-REPORT_FROM_EMAIL = "bot@kalshisportsbot.com"
+# Email report settings (SMTP)
+REPORT_FROM_EMAIL = "rohan.santhoshkumar1@gmail.com"
 REPORT_TO_EMAIL = "rohan.santhoshkumar1@gmail.com"
+SMTP_DEFAULT_HOST = "smtp.gmail.com"
+SMTP_DEFAULT_PORT = 587
 
 # Kalshi API base URLs
 KALSHI_DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2"
