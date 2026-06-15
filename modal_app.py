@@ -24,12 +24,12 @@ image = (
         "xgboost>=2.0",
         "pgmpy>=0.1.24",
         "scikit-learn>=1.4",
-        "numpy>=1.26",
+        "numpy>=1.26.0",
         "pandas>=2.0",
         "requests>=2.31",
         "psycopg2-binary>=2.9",
         "sendgrid>=6.11",
-        "sportsreference>=0.6.1",
+        "sportsreference>=0.5.0",
         "scipy>=1.12",
     )
 )
@@ -220,17 +220,15 @@ def nightly_retrain():
 
             # Compute 14-day rolling accuracy from Supabase predictions
             history = get_resolved_games_since(sport, since_date)
-            # Build accuracy: predictions where final_prob >= 0.5 and home actually won
             correct = 0
             total = len(history)
             for rec in history:
                 predicted_win = (rec.get("final_prob") or 0.5) >= 0.5
-                # Use trade status as ground truth if available
                 trade_status = rec.get("trade_status", "")
                 if trade_status in ("won", "lost"):
                     actual_win = trade_status == "won"
                 else:
-                    actual_win = predicted_win  # unknown, count as correct
+                    actual_win = predicted_win
                 if predicted_win == actual_win:
                     correct += 1
 
