@@ -3,9 +3,7 @@ modal_app.py — Modal application entry point.
 Defines all scheduled functions and the one-time initial_setup.
 """
 import traceback
-import sys
 from datetime import datetime, date, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import modal
 
@@ -16,7 +14,7 @@ from config import (
     MIN_ACCURACY_14D, ROLLING_ACCURACY_WINDOW,
 )
 
-# ── Modal image ────────────────────────────────────────────────────────────────
+# ── Modal image — pip install + bake all local source packages ─────────────────
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -31,6 +29,14 @@ image = (
         "sendgrid>=6.11",
         "sportsreference>=0.5.0",
         "scipy>=1.12",
+    )
+    .add_local_python_source(
+        "config",
+        "data",
+        "db",
+        "models",
+        "trading",
+        "reporting",
     )
 )
 
@@ -58,7 +64,7 @@ def _full_train_sport(sport: str):
     """Full training pipeline for a single sport."""
     from data.scrapers.sports_ref import get_nba_game_logs, get_nfl_game_logs, get_mlb_game_logs
     from models import xgboost_model, bayesian_model, meta_learner, calibration
-    from data.features import build_training_dataset, SPORT_FEATURES
+    from data.features import build_training_dataset
     import numpy as np
 
     print(f"[{sport}] Pulling historical data...")
@@ -76,19 +82,15 @@ def _full_train_sport(sport: str):
         print(f"[{sport}] No data — skipping")
         return
 
-    # XGBoost full train
     print(f"[{sport}] Training XGBoost...")
     xgb_m = xgboost_model.train(sport, logs)
     xgboost_model.save_model(sport, xgb_m, VOLUME_PATH)
 
-    # Bayesian Network
     print(f"[{sport}] Building Bayesian Network...")
     bn_m = bayesian_model.build_default_model()
     bn_m = bayesian_model.update_priors(bn_m, logs)
     bayesian_model.save_model(sport, bn_m, VOLUME_PATH)
 
-    # Generate stacked training labels for meta-learner
-    from data.features import build_training_dataset, features_to_vector
     X, y = build_training_dataset(sport, logs)
     if X.shape[0] == 0:
         print(f"[{sport}] No features to train meta-learner")
@@ -135,12 +137,10 @@ def morning_pipeline():
         try:
             print(f"Scraping {sport} games...")
             games = get_scoreboard(sport, game_date=run_date)
-            # Filter to upcoming (not yet completed) games only
             upcoming = [g for g in games if not g.get("completed", False)]
             print(f"{sport}: {len(upcoming)} upcoming games found")
             if not upcoming:
                 continue
-
             summary = execute_for_sport(sport, upcoming, VOLUME_PATH, run_date)
             all_summaries.append(summary)
             print(f"{sport}: placed={summary['bets_placed']}, skipped={summary['bets_skipped']}")
@@ -175,7 +175,6 @@ def nightly_retrain():
 
     from data.scrapers.espn import get_scoreboard
     from models import xgboost_model, bayesian_model
-    from data.features import build_training_dataset
     from db.supabase_client import (
         log_error, log_model_performance, get_resolved_games_since
     )
@@ -189,7 +188,6 @@ def nightly_retrain():
             resolved = [g for g in completed if g.get("completed", False)]
             print(f"[{sport}] {len(resolved)} resolved games")
 
-            # Build new game log records from ESPN completed games
             new_logs = []
             for g in resolved:
                 new_logs.append({
@@ -201,7 +199,6 @@ def nightly_retrain():
                     "home_recent_win_rate": 0.5,
                 })
 
-            # Load existing models
             xgb_m = xgboost_model.load_model(sport, VOLUME_PATH)
             bn_m = bayesian_model.load_model(sport, VOLUME_PATH)
 
@@ -218,17 +215,13 @@ def nightly_retrain():
                 bn_m = bayesian_model.update_priors(bn_m, new_logs)
                 bayesian_model.save_model(sport, bn_m, VOLUME_PATH)
 
-            # Compute 14-day rolling accuracy from Supabase predictions
             history = get_resolved_games_since(sport, since_date)
             correct = 0
             total = len(history)
             for rec in history:
                 predicted_win = (rec.get("final_prob") or 0.5) >= 0.5
                 trade_status = rec.get("trade_status", "")
-                if trade_status in ("won", "lost"):
-                    actual_win = trade_status == "won"
-                else:
-                    actual_win = predicted_win
+                actual_win = trade_status == "won" if trade_status in ("won", "lost") else predicted_win
                 if predicted_win == actual_win:
                     correct += 1
 
@@ -327,8 +320,8 @@ def initial_setup():
         try:
             _full_train_sport(sport)
         except Exception as exc:
-            from db.supabase_client import log_error
-            log_error(
+            from db.supabase_client import log_error as _log_error
+            _log_error(
                 context=f"initial_setup._full_train_sport({sport})",
                 error_msg=str(exc),
                 tb=traceback.format_exc(),
@@ -339,9 +332,9 @@ def initial_setup():
     print("=== initial_setup complete ===")
 
 
-# ── Local entrypoint for testing ──────────────────────────────────────────────
+# ── Local entrypoint ──────────────────────────────────────────────────────────
 
 @app.local_entrypoint()
 def main():
     print("Kalshi Sports Bot — use 'modal run modal_app.py::initial_setup' to initialize")
-    print("Scheduled functions: morning_pipeline (9AM ET), nightly_retrain (11PM ET), send_daily_email (11:30PM ET)")
+    print("Scheduled: morning_pipeline (9AM ET), nightly_retrain (11PM ET), send_daily_email (11:30PM ET)")
