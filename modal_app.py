@@ -30,6 +30,8 @@ image = (
         "nfl_data_py>=0.3",
         "pybaseball>=2.2",
         "kaggle>=1.6",
+        "lxml>=5.0",
+        "feedparser>=6.0",
     )
     .add_local_python_source(
         "config", "data", "db", "models", "trading", "reporting",
@@ -65,7 +67,6 @@ def _train_models_for_sport(sport: str, logs: list):
         print(f"[{sport}] too few records — skipping")
         return
 
-    # Compute and persist Elo ratings
     elos = compute_elo_series(logs)
     upsert_elo_ratings(sport, elos)
 
@@ -97,90 +98,208 @@ def _train_models_for_sport(sport: str, logs: list):
     raw_probs = meta_m.predict_proba(np.column_stack([xgb_probs, bn_probs]))[:, 1]
     calib_m = calibration.train_calibrator(raw_probs, y)
     calibration.save_model(sport, calib_m, VOLUME_PATH)
-    print(f"[{sport}] Models saved to Volume")
+    print(f"[{sport}] Full training complete — models saved to Volume")
 
 
 # ── Data loading helpers ───────────────────────────────────────────────────────
 
 def _load_nba_data(incremental_from=None) -> list:
-    from data.scrapers.nba import get_season_games, add_rest_and_b2b, kaggle_to_game_logs
-    from data.scrapers.kaggle_loader import get_nba_games
+    """
+    Full NBA data pipeline:
+    1. Kaggle bulk load (nathanlauga, wyattowalsh/basketball, NBA shot logs)
+    2. nba_api full history: LeagueGameLog + PlayByPlayV2 + ShotChartDetail +
+       PlayerDashPtStats + TeamDashLineups (1996-2024, ~3h with rate limiting)
+    """
+    from data.scrapers.nba import ingest_full_history, kaggle_to_game_logs, wyattowalsh_to_game_logs
+    from data.scrapers.kaggle_loader import get_nba_games, get_nba_full, get_nba_shot_logs
     from db.historical_store import upsert_game_logs
 
     all_logs = []
 
-    # Kaggle bulk load
+    # ── Kaggle: nathanlauga/nba-games ──────────────────────────────────────────
     try:
-        print("[NBA] Downloading Kaggle dataset...")
+        print("[NBA] Kaggle nathanlauga/nba-games...")
         df = get_nba_games()
         kaggle_logs = kaggle_to_game_logs(df)
         if incremental_from:
             kaggle_logs = [g for g in kaggle_logs if g.get("game_date", "") > str(incremental_from)]
-        print(f"[NBA] Kaggle: {len(kaggle_logs)} games")
         upsert_game_logs("NBA", kaggle_logs)
         all_logs.extend(kaggle_logs)
+        print(f"[NBA] Kaggle nathanlauga: {len(kaggle_logs)} games")
     except Exception as exc:
-        print(f"[NBA] Kaggle error: {exc}")
+        print(f"[NBA] Kaggle nathanlauga error: {exc}")
 
-    # nba_api for recent seasons (more detail: rest days, officials)
-    for season in NBA_SEASONS:
-        try:
-            print(f"[NBA] nba_api season {season}...")
-            games = get_season_games(season)
-            games = add_rest_and_b2b(games)
+    # ── Kaggle: wyattowalsh/basketball ────────────────────────────────────────
+    try:
+        print("[NBA] Kaggle wyattowalsh/basketball...")
+        datasets = get_nba_full()
+        game_df = datasets.get("game.csv", datasets.get(next((k for k in datasets if "game" in k.lower()), ""), None))
+        if game_df is not None and not game_df.empty:
+            wyatto_logs = wyattowalsh_to_game_logs(game_df)
             if incremental_from:
-                games = [g for g in games if g.get("game_date", "") > str(incremental_from)]
-            print(f"[NBA] nba_api {season}: {len(games)} games")
-            upsert_game_logs("NBA", games)
-            all_logs.extend(games)
-        except Exception as exc:
-            print(f"[NBA] nba_api season {season} error: {exc}")
+                wyatto_logs = [g for g in wyatto_logs if g.get("game_date", "") > str(incremental_from)]
+            upsert_game_logs("NBA", wyatto_logs)
+            all_logs.extend(wyatto_logs)
+            print(f"[NBA] Kaggle wyattowalsh: {len(wyatto_logs)} games")
+    except Exception as exc:
+        print(f"[NBA] Kaggle wyattowalsh error: {exc}")
 
+    # ── nba_api: full history (rate-limited, ~3h for 1996-2024) ───────────────
+    print(f"[NBA] nba_api full history: {NBA_SEASONS[0]}-{NBA_SEASONS[-1]} ({len(NBA_SEASONS)} seasons)...")
+    print("[NBA] Expected time: ~3h at 0.65s/call for PBP + shot charts + lineups")
+    try:
+        nba_logs = ingest_full_history(
+            seasons=NBA_SEASONS,
+            incremental_from=incremental_from,
+            pull_pbp=True,
+            pull_shots=True,
+            pull_lineups=True,
+        )
+        if nba_logs:
+            upsert_game_logs("NBA", nba_logs)
+            all_logs.extend(nba_logs)
+            print(f"[NBA] nba_api: {len(nba_logs)} enriched games stored")
+    except Exception as exc:
+        print(f"[NBA] nba_api history error: {exc}\n{traceback.format_exc()}")
+
+    print(f"[NBA] Total unique game records: {len(all_logs)}")
     return all_logs
 
 
 def _load_nfl_data(incremental_from=None) -> list:
-    from data.scrapers.nfl import get_schedules, schedules_to_game_logs, get_pbp, compute_epa_metrics
-    from data.scrapers.kaggle_loader import get_nfl_pbp
+    """
+    Full NFL data pipeline:
+    1. Kaggle: historical scores (1966-2020) + PBP (2009-2016)
+    2. nfl_data_py: schedules + full PBP (1999-2024) + participation (~50M rows) +
+       NextGen stats + rosters + injuries + contracts
+    """
+    from data.scrapers.nfl import ingest_full_history
+    from data.scrapers.kaggle_loader import get_nfl_scores, get_nfl_pbp, nfl_scores_to_game_logs
     from db.historical_store import upsert_game_logs
 
     all_logs = []
 
-    # nfl_data_py schedules (primary)
+    # ── Kaggle: historical NFL scores ─────────────────────────────────────────
     try:
-        print("[NFL] nfl_data_py schedules...")
-        df = get_schedules(NFL_SEASONS)
-        logs = schedules_to_game_logs(df)
+        print("[NFL] Kaggle tobycrabtree/nfl-scores...")
+        scores_df = get_nfl_scores()
+        kaggle_logs = nfl_scores_to_game_logs(scores_df)
         if incremental_from:
-            logs = [g for g in logs if g.get("game_date", "") > str(incremental_from)]
-        print(f"[NFL] nfl_data_py: {len(logs)} games")
-        upsert_game_logs("NFL", logs)
-        all_logs.extend(logs)
+            kaggle_logs = [g for g in kaggle_logs if g.get("game_date", "") > str(incremental_from)]
+        upsert_game_logs("NFL", kaggle_logs)
+        all_logs.extend(kaggle_logs)
+        print(f"[NFL] Kaggle NFL scores: {len(kaggle_logs)} games")
     except Exception as exc:
-        print(f"[NFL] nfl_data_py error: {exc}")
+        print(f"[NFL] Kaggle NFL scores error: {exc}")
 
+    # ── nfl_data_py: full history with all enrichment (~1-2h) ────────────────
+    print(f"[NFL] nfl_data_py: {NFL_SEASONS[0]}-{NFL_SEASONS[-1]} ({len(NFL_SEASONS)} seasons)")
+    print("[NFL] Downloading participation data (~50M rows) — this will take ~20-40min")
+    try:
+        nfl_logs = ingest_full_history(
+            seasons=NFL_SEASONS,
+            incremental_from=incremental_from,
+        )
+        if nfl_logs:
+            upsert_game_logs("NFL", nfl_logs)
+            all_logs.extend(nfl_logs)
+            print(f"[NFL] nfl_data_py: {len(nfl_logs)} enriched games stored")
+    except Exception as exc:
+        print(f"[NFL] nfl_data_py error: {exc}\n{traceback.format_exc()}")
+
+    print(f"[NFL] Total unique game records: {len(all_logs)}")
     return all_logs
 
 
 def _load_mlb_data(incremental_from=None) -> list:
-    from data.scrapers.mlb import get_statcast_season_chunked, statcast_to_game_logs
+    """
+    Full MLB data pipeline:
+    1. Kaggle: MLB season stats + game logs
+    2. pybaseball: 8 seasons Statcast (2015-2023) + FanGraphs batting/pitching
+    3. Pitcher-batter matchup aggregation → Supabase
+    """
+    from data.scrapers.mlb import ingest_full_history, statcast_to_game_logs
+    from data.scrapers.kaggle_loader import get_mlb_season_stats, get_mlb_game_logs, mlb_game_logs_to_standard
     from db.historical_store import upsert_game_logs
 
     all_logs = []
-    for year in MLB_SEASONS:
-        try:
-            print(f"[MLB] Statcast {year}...")
-            df = get_statcast_season_chunked(year)
-            logs = statcast_to_game_logs(df)
-            if incremental_from:
-                logs = [g for g in logs if g.get("game_date", "") > str(incremental_from)]
-            print(f"[MLB] Statcast {year}: {len(logs)} games")
-            upsert_game_logs("MLB", logs)
-            all_logs.extend(logs)
-        except Exception as exc:
-            print(f"[MLB] Statcast {year} error: {exc}")
 
+    # ── Kaggle: MLB historical game logs ──────────────────────────────────────
+    try:
+        print("[MLB] Kaggle saurabhshahane/mlb-game-log-dataset...")
+        gl_df = get_mlb_game_logs()
+        kaggle_logs = mlb_game_logs_to_standard(gl_df)
+        if incremental_from:
+            kaggle_logs = [g for g in kaggle_logs if g.get("game_date", "") > str(incremental_from)]
+        upsert_game_logs("MLB", kaggle_logs)
+        all_logs.extend(kaggle_logs)
+        print(f"[MLB] Kaggle MLB logs: {len(kaggle_logs)} games")
+    except Exception as exc:
+        print(f"[MLB] Kaggle MLB logs error: {exc}")
+
+    # ── pybaseball: 8 seasons Statcast + FanGraphs (~2-3h) ───────────────────
+    print(f"[MLB] pybaseball Statcast: {MLB_SEASONS[0]}-{MLB_SEASONS[-1]} ({len(MLB_SEASONS)} seasons)")
+    print(f"[MLB] Expected: ~{len(MLB_SEASONS)*10}M pitches total, ~2-3h")
+    try:
+        mlb_logs = ingest_full_history(
+            seasons=MLB_SEASONS,
+            incremental_from=incremental_from,
+        )
+        if mlb_logs:
+            upsert_game_logs("MLB", mlb_logs)
+            all_logs.extend(mlb_logs)
+            print(f"[MLB] pybaseball: {len(mlb_logs)} enriched games stored")
+    except Exception as exc:
+        print(f"[MLB] pybaseball error: {exc}\n{traceback.format_exc()}")
+
+    print(f"[MLB] Total unique game records: {len(all_logs)}")
     return all_logs
+
+
+def _enrich_weather(sport: str, game_logs: list) -> list:
+    """
+    Retroactively enrich game logs with historical weather data from Open-Meteo.
+    Only applies to outdoor NFL/MLB games. Caches results to Supabase.
+    """
+    from data.scrapers.weather import get_weather_for_game, compute_weather_impact_score
+    from db.historical_store import get_cached_weather, upsert_weather_cache
+
+    if sport == "NBA":
+        return game_logs
+
+    enriched_count = 0
+    cache_writes = []
+    for g in game_logs:
+        home_team = g.get("home_team", "")
+        game_date = g.get("game_date", "")
+        if not home_team or not game_date:
+            continue
+        if g.get("weather_impact_score") is not None:
+            continue  # already enriched
+
+        # Check cache first
+        venue_key = f"{sport}_{home_team}"
+        cached = get_cached_weather(venue_key, game_date)
+        if cached:
+            w = cached
+        else:
+            w = get_weather_for_game(sport, home_team, game_date, is_future=False)
+            if w:
+                cache_writes.append({
+                    "id": f"{venue_key}_{game_date}",
+                    "venue": venue_key,
+                    "game_date": game_date,
+                    **{k: v for k, v in w.items() if v is not None},
+                })
+
+        if w:
+            g["weather_impact_score"] = compute_weather_impact_score(w)
+            enriched_count += 1
+
+    if cache_writes:
+        upsert_weather_cache(cache_writes)
+    print(f"[{sport}] Weather enriched {enriched_count} games")
+    return game_logs
 
 
 # ── 1. Morning pipeline ────────────────────────────────────────────────────────
@@ -234,11 +353,8 @@ def nightly_retrain():
     from db.historical_store import get_last_game_date, upsert_game_logs, get_game_logs, upsert_elo_ratings
     from data.features import compute_elo_series
 
-    since_date = run_date - timedelta(days=ROLLING_ACCURACY_WINDOW)
-
     for sport in SPORTS:
         try:
-            # Fetch new ESPN results and upsert
             completed = get_scoreboard(sport, game_date=yesterday)
             new_logs = [
                 {
@@ -258,7 +374,6 @@ def nightly_retrain():
                 upsert_game_logs(sport, new_logs)
                 print(f"[{sport}] upserted {len(new_logs)} new results")
 
-            # Incremental retrain
             all_logs = get_game_logs(sport)
             xgb_m = xgboost_model.load_model(sport, VOLUME_PATH)
             bn_m = bayesian_model.load_model(sport, VOLUME_PATH)
@@ -268,18 +383,16 @@ def nightly_retrain():
                 xgboost_model.save_model(sport, xgb_m, VOLUME_PATH)
                 bn_m = bayesian_model.update_priors(bn_m, new_logs)
                 bayesian_model.save_model(sport, bn_m, VOLUME_PATH)
-                # Refresh Elo
                 elos = compute_elo_series(all_logs)
                 upsert_elo_ratings(sport, elos)
 
-            # Accuracy check
+            since_date = run_date - timedelta(days=ROLLING_ACCURACY_WINDOW)
             history = get_resolved_games_since(sport, since_date)
             total = len(history)
             correct = sum(
                 1 for r in history
                 if ((r.get("final_prob") or 0.5) >= 0.5) ==
-                   (r.get("trade_status") == "won" if r.get("trade_status") in ("won", "lost")
-                    else (r.get("final_prob") or 0.5) >= 0.5)
+                   (r.get("trade_status") in ("won",))
             )
             accuracy = correct / total if total > 0 else 0.5
             retrain_triggered = False
@@ -327,7 +440,7 @@ def send_daily_email():
 @app.function(
     image=image, secrets=secrets,
     volumes={VOLUME_PATH: model_volume},
-    timeout=14400,  # 4 hours for large Statcast downloads
+    timeout=21600,  # 6 hours: NBA PBP+shots (~3h) + NFL participation (~1h) + MLB Statcast (~2h)
 )
 def initial_setup():
     print("=== initial_setup ===")
@@ -335,33 +448,44 @@ def initial_setup():
 
     try:
         create_tables()
-        print("Supabase OK")
+        print("Supabase core tables OK")
     except Exception as exc:
         print(f"Table check: {exc}")
 
-    # NBA
+    # ── NBA: Kaggle + nba_api full history (~3h) ──────────────────────────────
     try:
+        print("\n=== NBA DATA PIPELINE ===")
         nba_logs = _load_nba_data()
-        _train_models_for_sport("NBA", nba_logs)
+        print(f"[NBA] Total logs: {len(nba_logs)}")
+        if nba_logs:
+            _train_models_for_sport("NBA", nba_logs)
     except Exception as exc:
         print(f"NBA pipeline error: {exc}\n{traceback.format_exc()}")
 
-    # NFL
+    # ── NFL: Kaggle + nfl_data_py + participation (~1.5h) ────────────────────
     try:
+        print("\n=== NFL DATA PIPELINE ===")
         nfl_logs = _load_nfl_data()
-        _train_models_for_sport("NFL", nfl_logs)
+        nfl_logs = _enrich_weather("NFL", nfl_logs)
+        print(f"[NFL] Total logs: {len(nfl_logs)}")
+        if nfl_logs:
+            _train_models_for_sport("NFL", nfl_logs)
     except Exception as exc:
         print(f"NFL pipeline error: {exc}\n{traceback.format_exc()}")
 
-    # MLB
+    # ── MLB: Kaggle + Statcast 8 seasons + FanGraphs (~2h) ───────────────────
     try:
+        print("\n=== MLB DATA PIPELINE ===")
         mlb_logs = _load_mlb_data()
-        _train_models_for_sport("MLB", mlb_logs)
+        mlb_logs = _enrich_weather("MLB", mlb_logs)
+        print(f"[MLB] Total logs: {len(mlb_logs)}")
+        if mlb_logs:
+            _train_models_for_sport("MLB", mlb_logs)
     except Exception as exc:
         print(f"MLB pipeline error: {exc}\n{traceback.format_exc()}")
 
     model_volume.commit()
-    print("=== initial_setup complete ===")
+    print("\n=== initial_setup complete ===")
 
 
 @app.local_entrypoint()
