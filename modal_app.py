@@ -9,12 +9,12 @@ import modal
 
 from config import (
     SPORTS, MODEL_VOLUME_NAME,
-    SECRET_KALSHI, SECRET_SUPABASE, SECRET_SENDGRID,
+    SECRET_KALSHI, SECRET_SUPABASE, SECRET_SMTP,
     SECRET_API_SPORTS, SECRET_ODDS_API, SECRET_NEWS_API,
     MIN_ACCURACY_14D, ROLLING_ACCURACY_WINDOW,
 )
 
-# ── Modal image — pip install + bake all local source packages ─────────────────
+# ── Modal image ────────────────────────────────────────────────────────────────
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -25,8 +25,7 @@ image = (
         "numpy>=1.26.0",
         "pandas>=2.0",
         "requests>=2.31",
-        "psycopg2-binary>=2.9",
-        "sendgrid>=6.11",
+        "supabase>=2.0",
         "sportsreference>=0.5.0",
         "scipy>=1.12",
     )
@@ -47,7 +46,7 @@ model_volume = modal.Volume.from_name(MODEL_VOLUME_NAME, create_if_missing=True)
 secrets = [
     modal.Secret.from_name(SECRET_KALSHI),
     modal.Secret.from_name(SECRET_SUPABASE),
-    modal.Secret.from_name(SECRET_SENDGRID),
+    modal.Secret.from_name(SECRET_SMTP),
     modal.Secret.from_name(SECRET_API_SPORTS),
     modal.Secret.from_name(SECRET_ODDS_API),
     modal.Secret.from_name(SECRET_NEWS_API),
@@ -266,7 +265,7 @@ def nightly_retrain():
     timeout=300,
 )
 def send_daily_email():
-    """11:30PM ET: build and send HTML daily summary email via SendGrid."""
+    """11:30PM ET: build and send HTML daily summary email via SMTP."""
     run_date = datetime.utcnow().date()
     print(f"=== send_daily_email {run_date} ===")
 
@@ -296,24 +295,24 @@ def send_daily_email():
 )
 def initial_setup():
     """
-    One-time setup: create Supabase tables, pull 3-5 seasons of data,
+    One-time setup: verify Supabase tables reachable, pull 3-5 seasons of data,
     full-train models for NBA/NFL/MLB, save to Modal Volume.
     """
     print("=== initial_setup ===")
 
     from db.supabase_client import create_tables, log_error
 
-    print("Creating Supabase tables...")
+    print("Verifying Supabase tables...")
     try:
         create_tables()
-        print("Tables created")
+        print("Supabase OK")
     except Exception as exc:
         log_error(
             context="initial_setup.create_tables",
             error_msg=str(exc),
             tb=traceback.format_exc(),
         )
-        print(f"Table creation error: {exc}")
+        print(f"Table check error: {exc}")
 
     print("Starting full model training for all sports...")
     for sport in SPORTS:
