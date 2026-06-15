@@ -1,20 +1,23 @@
 """
-reporting/email_report.py — Builds and sends the daily HTML email report via SendGrid.
+reporting/email_report.py — Builds and sends the daily HTML email report via SMTP.
+Reads SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD from environment (smtp-secret).
 """
 import os
+import smtplib
 import traceback
 from datetime import date, datetime
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from typing import Optional
 
-import sendgrid
-from sendgrid.helpers.mail import Mail, Content
-
-from config import REPORT_FROM_EMAIL, REPORT_TO_EMAIL, SPORTS
+from config import (
+    REPORT_FROM_EMAIL, REPORT_TO_EMAIL, SPORTS,
+    SMTP_DEFAULT_HOST, SMTP_DEFAULT_PORT,
+)
 from db.supabase_client import (
     get_todays_predictions, get_todays_trades, get_open_trades,
     get_todays_errors, get_todays_threshold_events, log_error,
 )
-from trading.kalshi_client import get_implied_probability, get_market
 from trading.kelly import compute_pnl
 
 
@@ -36,12 +39,11 @@ def _build_html(run_date: date) -> str:
     pnl = compute_pnl(trades)
     bets = [t for t in trades]
     skipped = [p for p in predictions if p["decision"].startswith("skip")]
-
-    # Group predictions by sport
     sports_covered = list({p["sport"] for p in predictions})
 
-    html = f"""
-<!DOCTYPE html>
+    pnl_class = "pnl-pos" if pnl >= 0 else "pnl-neg"
+
+    html = f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
@@ -53,120 +55,97 @@ def _build_html(run_date: date) -> str:
   th {{ background: #283593; color: white; padding: 8px 12px; text-align: left; font-size: 12px; }}
   td {{ padding: 7px 12px; border-bottom: 1px solid #e0e0e0; font-size: 13px; }}
   tr:nth-child(even) {{ background: #f5f5f5; }}
-  .badge-bet {{ background: #2e7d32; color: white; border-radius: 4px; padding: 2px 8px; }}
-  .badge-skip {{ background: #9e9e9e; color: white; border-radius: 4px; padding: 2px 8px; }}
-  .badge-error {{ background: #c62828; color: white; border-radius: 4px; padding: 2px 8px; }}
   .stat-box {{ display: inline-block; background: #e8eaf6; border-radius: 8px; padding: 12px 20px; margin: 8px; text-align: center; }}
   .stat-val {{ font-size: 24px; font-weight: bold; color: #1a237e; }}
   .stat-label {{ font-size: 11px; color: #555; margin-top: 4px; }}
   .pnl-pos {{ color: #2e7d32; font-weight: bold; }}
   .pnl-neg {{ color: #c62828; font-weight: bold; }}
   pre {{ background: #f5f5f5; padding: 10px; border-radius: 4px; font-size: 11px; overflow-x: auto; }}
-  .section {{ margin-top: 32px; }}
 </style>
 </head>
 <body>
-<h1>🤖 Kalshi Sports Bot — Daily Report</h1>
+<h1>Kalshi Sports Bot - Daily Report</h1>
 <p><strong>Date:</strong> {run_date.strftime("%A, %B %d, %Y")} &nbsp;|&nbsp; <strong>Sports:</strong> {", ".join(sports_covered) or "None"}</p>
 
-<div class="section">
+<div style="margin-top:16px;">
   <div class="stat-box"><div class="stat-val">{len(bets)}</div><div class="stat-label">Trades Placed</div></div>
-  <div class="stat-box"><div class="stat-val">{len(skipped)}</div><div class="stat-label">Markets Skipped</div></div>
+  <div class="stat-box"><div class="stat-val">{len(skipped)}</div><div class="stat-label">Skipped</div></div>
   <div class="stat-box"><div class="stat-val">{len(open_positions)}</div><div class="stat-label">Open Positions</div></div>
-  <div class="stat-box"><div class="stat-val class="{"pnl-pos" if pnl >= 0 else "pnl-neg"}">{_fmt_usd(pnl)}</div><div class="stat-label">Demo P&amp;L</div></div>
+  <div class="stat-box"><div class="stat-val {pnl_class}">{_fmt_usd(pnl)}</div><div class="stat-label">Demo P&amp;L</div></div>
 </div>
 """
 
-    # Trades placed
-    html += '<h2>Trades Placed</h2>'
+    html += "<h2>Trades Placed</h2>"
     if bets:
-        html += """<table>
-<tr><th>Sport</th><th>Matchup</th><th>Side</th><th>Stake</th><th>Model Prob</th><th>Edge</th><th>Status</th></tr>"""
+        html += "<table><tr><th>Sport</th><th>Matchup</th><th>Side</th><th>Stake</th><th>Model Prob</th><th>Edge</th><th>Status</th></tr>"
         for t in bets:
-            html += f"""<tr>
-<td>{t.get("sport","")}</td>
-<td>{t.get("home_team","")} vs {t.get("away_team","")}</td>
-<td>{t.get("side","").upper()}</td>
-<td>{_fmt_usd(t.get("bet_size_usd", 0))}</td>
-<td>{_fmt_pct(t.get("final_prob", 0))}</td>
-<td>{_fmt_pct(t.get("edge", 0))}</td>
-<td>{t.get("status","")}</td>
-</tr>"""
+            html += (f"<tr><td>{t.get('sport','')}</td>"
+                     f"<td>{t.get('home_team','')} vs {t.get('away_team','')}</td>"
+                     f"<td>{t.get('side','').upper()}</td>"
+                     f"<td>{_fmt_usd(t.get('bet_size_usd', 0))}</td>"
+                     f"<td>{_fmt_pct(t.get('final_prob', 0))}</td>"
+                     f"<td>{_fmt_pct(t.get('edge', 0))}</td>"
+                     f"<td>{t.get('status','')}</td></tr>")
         html += "</table>"
     else:
         html += "<p><em>No trades placed today.</em></p>"
 
-    # Skipped markets
-    html += '<h2>Evaluated but Skipped Markets</h2>'
+    html += "<h2>Evaluated but Skipped</h2>"
     if skipped:
-        html += """<table>
-<tr><th>Sport</th><th>Matchup</th><th>Model Prob</th><th>Kalshi Implied</th><th>Edge</th><th>Reason</th></tr>"""
+        html += "<table><tr><th>Sport</th><th>Matchup</th><th>Model Prob</th><th>Kalshi Implied</th><th>Edge</th><th>Reason</th></tr>"
         for p in skipped:
-            reason_map = {
-                "skip_no_market": "No Kalshi market found",
-                "skip": "Insufficient edge / abstention band",
-            }
+            reason_map = {"skip_no_market": "No Kalshi market", "skip": "Low edge / abstention"}
             reason = reason_map.get(p.get("decision", "skip"), p.get("decision", ""))
-            html += f"""<tr>
-<td>{p.get("sport","")}</td>
-<td>{p.get("home_team","")} vs {p.get("away_team","")}</td>
-<td>{_fmt_pct(p.get("final_prob", 0))}</td>
-<td>{_fmt_pct(p.get("kalshi_implied", 0))}</td>
-<td>{_fmt_pct(p.get("edge", 0))}</td>
-<td>{reason}</td>
-</tr>"""
+            html += (f"<tr><td>{p.get('sport','')}</td>"
+                     f"<td>{p.get('home_team','')} vs {p.get('away_team','')}</td>"
+                     f"<td>{_fmt_pct(p.get('final_prob', 0))}</td>"
+                     f"<td>{_fmt_pct(p.get('kalshi_implied', 0))}</td>"
+                     f"<td>{_fmt_pct(p.get('edge', 0))}</td>"
+                     f"<td>{reason}</td></tr>")
         html += "</table>"
     else:
         html += "<p><em>No skipped markets today.</em></p>"
 
-    # Open positions
-    html += '<h2>Open Positions</h2>'
+    html += "<h2>Open Positions</h2>"
     if open_positions:
-        html += """<table>
-<tr><th>Sport</th><th>Matchup</th><th>Market ID</th><th>Side</th><th>Stake</th></tr>"""
+        html += "<table><tr><th>Sport</th><th>Matchup</th><th>Market ID</th><th>Side</th><th>Stake</th></tr>"
         for pos in open_positions:
-            html += f"""<tr>
-<td>{pos.get("sport","")}</td>
-<td>{pos.get("home_team","")} vs {pos.get("away_team","")}</td>
-<td>{pos.get("kalshi_market_id","")}</td>
-<td>{pos.get("side","")}</td>
-<td>{_fmt_usd(pos.get("bet_size_usd", 0))}</td>
-</tr>"""
+            html += (f"<tr><td>{pos.get('sport','')}</td>"
+                     f"<td>{pos.get('home_team','')} vs {pos.get('away_team','')}</td>"
+                     f"<td>{pos.get('kalshi_market_id','')}</td>"
+                     f"<td>{pos.get('side','')}</td>"
+                     f"<td>{_fmt_usd(pos.get('bet_size_usd', 0))}</td></tr>")
         html += "</table>"
     else:
         html += "<p><em>No open positions.</em></p>"
 
-    # P&L summary
-    html += f'<h2>Running Demo P&amp;L</h2>'
-    pnl_class = "pnl-pos" if pnl >= 0 else "pnl-neg"
-    html += f'<p class="{pnl_class}" style="font-size:20px;">{_fmt_usd(pnl)}</p>'
+    pnl_class2 = "pnl-pos" if pnl >= 0 else "pnl-neg"
+    html += f"<h2>Running Demo P&amp;L</h2><p class='{pnl_class2}' style='font-size:20px;'>{_fmt_usd(pnl)}</p>"
 
-    # Threshold events
     if threshold_events:
-        html += '<h2>Threshold Adjustment Events</h2><ul>'
+        html += "<h2>Threshold Adjustments</h2><ul>"
         for ev in threshold_events:
-            html += f'<li><strong>{ev.get("event_type")}</strong>: {_fmt_pct(ev.get("old_value",0))} → {_fmt_pct(ev.get("new_value",0))} — {ev.get("reason","")}</li>'
-        html += '</ul>'
+            html += (f"<li><strong>{ev.get('event_type')}</strong>: "
+                     f"{_fmt_pct(ev.get('old_value',0))} → {_fmt_pct(ev.get('new_value',0))} "
+                     f"— {ev.get('reason','')}</li>")
+        html += "</ul>"
 
-    # Errors
-    html += '<h2>Errors</h2>'
+    html += "<h2>Errors</h2>"
     if errors:
         for err in errors:
-            html += f"""
-<div style="border-left: 4px solid #c62828; padding: 8px 16px; margin: 8px 0; background:#fff8f8;">
-  <p><strong>Context:</strong> {err.get("context","")}</p>
-  <p><strong>Error:</strong> {err.get("error_msg","")}</p>
-  <pre>{err.get("traceback","")}</pre>
-</div>"""
+            html += (f"<div style='border-left:4px solid #c62828;padding:8px 16px;margin:8px 0;background:#fff8f8;'>"
+                     f"<p><strong>Context:</strong> {err.get('context','')}</p>"
+                     f"<p><strong>Error:</strong> {err.get('error_msg','')}</p>"
+                     f"<pre>{err.get('traceback','')}</pre></div>")
     else:
-        html += "<p style='color:#2e7d32;'>✓ No errors today.</p>"
+        html += "<p style='color:#2e7d32;'>No errors today.</p>"
 
     html += "</body></html>"
     return html
 
 
 def send_daily_report(run_date: Optional[date] = None):
-    """Build and send the daily HTML email via SendGrid."""
+    """Build and send the daily HTML email via SMTP."""
     if run_date is None:
         run_date = datetime.utcnow().date()
 
@@ -181,16 +160,24 @@ def send_daily_report(run_date: Optional[date] = None):
         )
         html_body = f"<p>Error building report: {exc}</p>"
 
+    smtp_host = os.environ.get("SMTP_HOST", SMTP_DEFAULT_HOST)
+    smtp_port = int(os.environ.get("SMTP_PORT", SMTP_DEFAULT_PORT))
+    smtp_user = os.environ["SMTP_USER"]
+    smtp_password = os.environ["SMTP_PASSWORD"]
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"Kalshi Sports Bot Report — {run_date}"
+    msg["From"] = smtp_user
+    msg["To"] = REPORT_TO_EMAIL
+    msg.attach(MIMEText(html_body, "html"))
+
     try:
-        sg = sendgrid.SendGridAPIClient(api_key=os.environ["SENDGRID_API_KEY"])
-        mail = Mail(
-            from_email=REPORT_FROM_EMAIL,
-            to_emails=REPORT_TO_EMAIL,
-            subject=f"Kalshi Sports Bot Report — {run_date}",
-            html_content=html_body,
-        )
-        response = sg.send(mail)
-        print(f"Email sent: status {response.status_code}")
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.sendmail(smtp_user, [REPORT_TO_EMAIL], msg.as_string())
+        print(f"Email sent via {smtp_host}:{smtp_port} to {REPORT_TO_EMAIL}")
     except Exception as exc:
         log_error(
             context="email_report.send",
