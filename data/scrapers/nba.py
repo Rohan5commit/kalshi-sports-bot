@@ -31,6 +31,31 @@ def _call(fn, *args, **kwargs):
     raise last_exc
 
 
+def _get_df(result, index: int = 0) -> "pd.DataFrame":
+    """
+    Extract DataFrame from nba_api result, tolerating resultSet vs resultSets
+    key differences across nba_api versions and older game data.
+    """
+    import pandas as pd
+    try:
+        frames = result.get_data_frames()
+        if frames and index < len(frames):
+            return frames[index]
+        return pd.DataFrame()
+    except KeyError:
+        # nba_api version mismatch: try raw resultSets
+        try:
+            raw = result.get_dict()
+            rs = raw.get("resultSets") or raw.get("resultSet") or []
+            if isinstance(rs, list) and index < len(rs):
+                headers = rs[index].get("headers", [])
+                rows = rs[index].get("rowSet", [])
+                return pd.DataFrame(rows, columns=headers)
+        except Exception:
+            pass
+        return pd.DataFrame()
+
+
 def _season_str(year: int) -> str:
     """Convert season start year to NBA API format: 2023 → '2023-24'."""
     return f"{year}-{str(year + 1)[-2:]}"
@@ -46,7 +71,7 @@ def get_season_games(season: int) -> list:
                    season_nullable=season_str,
                    league_id_nullable="00",
                    season_type_nullable="Regular Season")
-    df = finder.get_data_frames()[0]
+    df = _get_df(finder)
 
     games: dict = {}
     for _, row in df.iterrows():
@@ -95,7 +120,7 @@ def get_play_by_play(game_id: str) -> pd.DataFrame:
     from nba_api.stats.endpoints import PlayByPlayV2
     try:
         result = _call(PlayByPlayV2, game_id=game_id)
-        return result.get_data_frames()[0]
+        return _get_df(result)
     except Exception as exc:
         print(f"PlayByPlayV2 error {game_id}: {exc}")
         return pd.DataFrame()
@@ -136,11 +161,12 @@ def get_shot_chart(game_id: str, team_id: int, season: str) -> pd.DataFrame:
     from nba_api.stats.endpoints import ShotChartDetail
     try:
         result = _call(ShotChartDetail,
-                       game_id=game_id,
+                       player_id=0,
                        team_id=team_id,
+                       game_id_nullable=game_id,
                        season_nullable=season,
                        season_type_all_star="Regular Season")
-        return result.get_data_frames()[0]
+        return _get_df(result)
     except Exception as exc:
         print(f"ShotChartDetail error {game_id} team {team_id}: {exc}")
         return pd.DataFrame()
@@ -190,7 +216,7 @@ def get_player_tracking(team_id: int, season: str) -> pd.DataFrame:
     try:
         result = _call(PlayerDashPtStats, team_id=str(team_id), season=season,
                        per_mode="PerGame", season_type_all_star="Regular Season")
-        return result.get_data_frames()[0]
+        return _get_df(result)
     except Exception as exc:
         print(f"PlayerDashPtStats error team {team_id} {season}: {exc}")
         return pd.DataFrame()
@@ -229,7 +255,7 @@ def get_lineup_stats(team_id: int, season: str) -> pd.DataFrame:
                        measure_type_detailed_defense="Advanced",
                        per_mode_simple="Per100Possessions",
                        season_type_all_star="Regular Season")
-        return result.get_data_frames()[0]
+        return _get_df(result)
     except Exception as exc:
         print(f"TeamDashLineups error team {team_id} {season}: {exc}")
         return pd.DataFrame()
@@ -264,7 +290,7 @@ def get_team_season_stats(season: str) -> pd.DataFrame:
                        measure_type_detailed_defense="Advanced",
                        per_mode_simple="PerGame",
                        season_type_all_star="Regular Season")
-        return result.get_data_frames()[0]
+        return _get_df(result)
     except Exception as exc:
         print(f"LeagueDashTeamStats error {season}: {exc}")
         return pd.DataFrame()
@@ -294,7 +320,7 @@ def get_advanced_stats(game_id: str) -> dict:
     try:
         from nba_api.stats.endpoints import BoxScoreAdvancedV2
         adv = _call(BoxScoreAdvancedV2, game_id=game_id)
-        df = adv.get_data_frames()[0]
+        df = _get_df(adv)
         starters = df[df["START_POSITION"].notna() & (df["START_POSITION"] != "")]
         if starters.empty:
             return {}
@@ -317,7 +343,7 @@ def get_officials(game_id: str) -> str:
     try:
         from nba_api.stats.endpoints import BoxScoreSummaryV2
         summary = _call(BoxScoreSummaryV2, game_id=game_id)
-        officials_df = summary.get_data_frames()[2]
+        officials_df = _get_df(summary, 2)
         if officials_df.empty:
             return ""
         names = officials_df.apply(
