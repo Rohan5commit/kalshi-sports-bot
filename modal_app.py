@@ -10,7 +10,7 @@ import modal
 from config import (
     SPORTS, MODEL_VOLUME_NAME,
     SECRET_KALSHI, SECRET_SUPABASE, SECRET_SMTP,
-    SECRET_API_SPORTS, SECRET_ODDS_API, SECRET_NEWS_API,
+    SECRET_API_SPORTS, SECRET_NEWS_API,
     MIN_ACCURACY_14D, ROLLING_ACCURACY_WINDOW,
 )
 
@@ -48,7 +48,6 @@ secrets = [
     modal.Secret.from_name(SECRET_SUPABASE),
     modal.Secret.from_name(SECRET_SMTP),
     modal.Secret.from_name(SECRET_API_SPORTS),
-    modal.Secret.from_name(SECRET_ODDS_API),
     modal.Secret.from_name(SECRET_NEWS_API),
 ]
 
@@ -60,7 +59,6 @@ VOLUME_PATH = "/models"
 # ── Helper: full train for one sport ──────────────────────────────────────────
 
 def _full_train_sport(sport: str):
-    """Full training pipeline for a single sport."""
     from data.scrapers.sports_ref import get_nba_game_logs, get_nfl_game_logs, get_mlb_game_logs
     from models import xgboost_model, bayesian_model, meta_learner, calibration
     from data.features import build_training_dataset
@@ -123,7 +121,6 @@ def _full_train_sport(sport: str):
     timeout=1800,
 )
 def morning_pipeline():
-    """9AM ET: scrape games, run parallel inference, place demo trades, log to Supabase."""
     run_date = datetime.utcnow().date()
     print(f"=== morning_pipeline {run_date} ===")
 
@@ -134,10 +131,9 @@ def morning_pipeline():
     all_summaries = []
     for sport in SPORTS:
         try:
-            print(f"Scraping {sport} games...")
             games = get_scoreboard(sport, game_date=run_date)
             upcoming = [g for g in games if not g.get("completed", False)]
-            print(f"{sport}: {len(upcoming)} upcoming games found")
+            print(f"{sport}: {len(upcoming)} upcoming games")
             if not upcoming:
                 continue
             summary = execute_for_sport(sport, upcoming, VOLUME_PATH, run_date)
@@ -151,7 +147,6 @@ def morning_pipeline():
                 run_date=run_date,
             )
             print(f"ERROR in {sport}: {exc}")
-            continue
 
     print(f"morning_pipeline complete: {all_summaries}")
     model_volume.commit()
@@ -167,7 +162,6 @@ def morning_pipeline():
     timeout=3600,
 )
 def nightly_retrain():
-    """11PM ET: ingest resolved results, incremental retrain, check accuracy, save models."""
     run_date = datetime.utcnow().date()
     yesterday = run_date - timedelta(days=1)
     print(f"=== nightly_retrain {run_date} ===")
@@ -182,63 +176,55 @@ def nightly_retrain():
 
     for sport in SPORTS:
         try:
-            print(f"[{sport}] Fetching resolved results for {yesterday}...")
             completed = get_scoreboard(sport, game_date=yesterday)
             resolved = [g for g in completed if g.get("completed", False)]
             print(f"[{sport}] {len(resolved)} resolved games")
 
-            new_logs = []
-            for g in resolved:
-                new_logs.append({
-                    "sport": sport,
-                    "home": True,
+            new_logs = [
+                {
+                    "sport": sport, "home": True,
                     "win": g.get("home_winner", False),
                     "points": g.get("home_score", 0),
                     "opp_points": g.get("away_score", 0),
                     "home_recent_win_rate": 0.5,
-                })
+                }
+                for g in resolved
+            ]
 
             xgb_m = xgboost_model.load_model(sport, VOLUME_PATH)
             bn_m = bayesian_model.load_model(sport, VOLUME_PATH)
 
             if xgb_m is None or bn_m is None:
-                print(f"[{sport}] No existing models — skipping incremental retrain")
+                print(f"[{sport}] No existing models — skipping")
                 continue
 
             if new_logs:
-                print(f"[{sport}] Incremental XGBoost retrain on {len(new_logs)} new games...")
                 xgb_m = xgboost_model.incremental_retrain(sport, new_logs, xgb_m)
                 xgboost_model.save_model(sport, xgb_m, VOLUME_PATH)
-
-                print(f"[{sport}] Updating BN priors...")
                 bn_m = bayesian_model.update_priors(bn_m, new_logs)
                 bayesian_model.save_model(sport, bn_m, VOLUME_PATH)
 
             history = get_resolved_games_since(sport, since_date)
-            correct = 0
             total = len(history)
-            for rec in history:
-                predicted_win = (rec.get("final_prob") or 0.5) >= 0.5
-                trade_status = rec.get("trade_status", "")
-                actual_win = trade_status == "won" if trade_status in ("won", "lost") else predicted_win
-                if predicted_win == actual_win:
-                    correct += 1
-
+            correct = sum(
+                1 for rec in history
+                if ((rec.get("final_prob") or 0.5) >= 0.5) ==
+                   (rec.get("trade_status") == "won" if rec.get("trade_status") in ("won", "lost")
+                    else (rec.get("final_prob") or 0.5) >= 0.5)
+            )
             accuracy = correct / total if total > 0 else 0.5
             retrain_triggered = False
 
-            print(f"[{sport}] 14-day accuracy: {accuracy:.3f} over {total} predictions")
+            print(f"[{sport}] 14d accuracy: {accuracy:.3f} ({total} predictions)")
 
             if accuracy < MIN_ACCURACY_14D and total >= 10:
-                print(f"[{sport}] Accuracy {accuracy:.3f} below threshold — triggering full retrain")
+                print(f"[{sport}] Below threshold — full retrain")
                 retrain_triggered = True
                 _full_train_sport(sport)
 
             log_model_performance(
-                run_date=run_date,
-                sport=sport,
-                accuracy_14d=accuracy,
-                total_predictions=total,
+                run_date=run_date, sport=sport,
+                accuracy_14d=accuracy, total_predictions=total,
                 retrain_triggered=retrain_triggered,
             )
 
@@ -250,7 +236,6 @@ def nightly_retrain():
                 run_date=run_date,
             )
             print(f"ERROR in {sport}: {exc}")
-            continue
 
     model_volume.commit()
     print("nightly_retrain complete")
@@ -265,7 +250,6 @@ def nightly_retrain():
     timeout=300,
 )
 def send_daily_email():
-    """11:30PM ET: build and send HTML daily summary email via SMTP."""
     run_date = datetime.utcnow().date()
     print(f"=== send_daily_email {run_date} ===")
 
@@ -294,10 +278,6 @@ def send_daily_email():
     timeout=7200,
 )
 def initial_setup():
-    """
-    One-time setup: verify Supabase tables reachable, pull 3-5 seasons of data,
-    full-train models for NBA/NFL/MLB, save to Modal Volume.
-    """
     print("=== initial_setup ===")
 
     from db.supabase_client import create_tables, log_error
