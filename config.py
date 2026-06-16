@@ -67,7 +67,7 @@ OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 NBA_SEASONS = list(range(1996, 2025))
 # NFL: 1999 season through 2024
 NFL_SEASONS = list(range(1999, 2025))
-# MLB: 2015 through 2023 (8 seasons of Statcast data)
-MLB_SEASONS = list(range(2015, 2024))
+# MLB: 2019 through 2023 (5 seasons of Statcast — 9 seasons took ~5h, over budget)
+MLB_SEASONS = list(range(2019, 2024))
 
 SPORT_SR_TYPE = {"NBA": "nba", "NFL": "nfl", "MLB": "mlb"}
