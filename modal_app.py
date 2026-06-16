@@ -454,18 +454,19 @@ def initial_setup():
     try:
         print("\n=== NFL DATA PIPELINE ===")
         nfl_logs = _load_nfl_data()
-        nfl_logs = _enrich_weather("NFL", nfl_logs)
+        # Weather enrichment skipped in initial_setup — too slow (Open-Meteo 429s on bulk historical).
+        # _enrich_weather runs in morning_pipeline for current games (forecast, not archive).
         print(f"[NFL] Total logs: {len(nfl_logs)}")
         if nfl_logs:
             _train_models_for_sport("NFL", nfl_logs)
     except Exception as exc:
         print(f"NFL pipeline error: {exc}\n{traceback.format_exc()}")
 
-    # ── MLB: Kaggle + Statcast 8 seasons + FanGraphs (~2h) ───────────────────
+    # ── MLB: Kaggle + Statcast 5 seasons (2019-2023) + FanGraphs (~2h) ───────
     try:
         print("\n=== MLB DATA PIPELINE ===")
         mlb_logs = _load_mlb_data()
-        mlb_logs = _enrich_weather("MLB", mlb_logs)
+        # Weather enrichment skipped in initial_setup — see NFL comment above.
         print(f"[MLB] Total logs: {len(mlb_logs)}")
         if mlb_logs:
             _train_models_for_sport("MLB", mlb_logs)
