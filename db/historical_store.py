@@ -96,8 +96,11 @@ def find_game_by_teams_and_date(sport: str, team1: str, team2: str,
         rows = (_sb().table(table)
                 .select("game_id,game_date,home_team,away_team")
                 .eq("game_date", game_date).execute().data)
+        print(f"[DEBUG DB] sport={sport} date={game_date} rows={len(rows)}")
         if not rows:
+            print(f"[DEBUG ESPN] calling fallback for {sport} {game_date}")
             rows = _espn_fallback_games(sport, game_date)
+            print(f"[DEBUG ESPN] got {len(rows)} rows")
         best, best_score = None, 0.0
         for row in rows:
             home = row.get("home_team", "")
