@@ -495,14 +495,15 @@ def ingest_full_history(seasons: list, incremental_from=None,
                 except Exception:
                     lineup_net_ratings[abbr] = 0.0
 
-        # Season-level: player tracking per team
+        # Season-level: player tracking per team (gated with lineups — both hit stats.nba.com)
         tracking_metrics = {}
-        for abbr, team_id in all_teams.items():
-            try:
-                tr_df = get_player_tracking(team_id, season_str)
-                tracking_metrics[abbr] = compute_tracking_metrics(tr_df)
-            except Exception:
-                tracking_metrics[abbr] = {}
+        if pull_lineups:
+            for abbr, team_id in all_teams.items():
+                try:
+                    tr_df = get_player_tracking(team_id, season_str)
+                    tracking_metrics[abbr] = compute_tracking_metrics(tr_df)
+                except Exception:
+                    tracking_metrics[abbr] = {}
 
         # Game-level: PBP, shot chart, advanced box
         pbp_cache = {}
