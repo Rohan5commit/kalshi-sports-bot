@@ -144,23 +144,11 @@ def _load_nba_data(incremental_from=None) -> list:
     except Exception as exc:
         print(f"[NBA] Kaggle wyattowalsh error: {exc}")
 
-    # ── nba_api: full history (rate-limited, ~3h for 1996-2024) ───────────────
-    print(f"[NBA] nba_api full history: {NBA_SEASONS[0]}-{NBA_SEASONS[-1]} ({len(NBA_SEASONS)} seasons)...")
-    print("[NBA] Expected time: ~3h at 0.65s/call for PBP + shot charts + lineups")
-    try:
-        nba_logs = ingest_full_history(
-            seasons=NBA_SEASONS,
-            incremental_from=incremental_from,
-            pull_pbp=True,
-            pull_shots=True,
-            pull_lineups=True,
-        )
-        if nba_logs:
-            upsert_game_logs("NBA", nba_logs)
-            all_logs.extend(nba_logs)
-            print(f"[NBA] nba_api: {len(nba_logs)} enriched games stored")
-    except Exception as exc:
-        print(f"[NBA] nba_api history error: {exc}\n{traceback.format_exc()}")
+    # ── nba_api skipped for initial setup ────────────────────────────────────
+    # stats.nba.com blocks cloud IPs; LeagueGameFinder + per-game calls all timeout.
+    # 26K Kaggle games (already upserted above) are sufficient to train the initial model.
+    # Re-enable ingest_full_history in nightly_retrain once a residential proxy is available.
+    print("[NBA] nba_api skipped (cloud IP block) — training on Kaggle game logs")
 
     print(f"[NBA] Total unique game records: {len(all_logs)}")
     return all_logs
