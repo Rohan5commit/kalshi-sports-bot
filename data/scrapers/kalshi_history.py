@@ -260,9 +260,9 @@ def ingest_kalshi_history() -> dict:
         title = market.get("title") or market.get("subtitle", "")
         close_time = market.get("close_time") or market.get("expiration_time", "")
 
-        # Fast pre-filter: game markets always contain "vs" or "@" in title
+        # Fast pre-filter: game markets always contain "vs", "at", or "@" in title
         title_lower = title.lower()
-        if " vs" not in title_lower and " @ " not in title_lower:
+        if " vs" not in title_lower and " @ " not in title_lower and " at " not in title_lower:
             if (i + 1) % 10000 == 0:
                 print(f"[Kalshi] scanned {i+1}/{len(all_markets)} markets...")
             continue
