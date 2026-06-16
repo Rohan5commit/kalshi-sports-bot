@@ -1,7 +1,7 @@
 """
 db/historical_store.py — Supabase storage for historical game logs, Elo ratings,
-lineup stats, referee tendencies, pitcher-batter matchups, weather cache.
-Pattern: full load on first run; incremental on subsequent runs.
+lineup stats, referee tendencies, pitcher-batter matchups, weather cache,
+Kalshi/Polymarket market data, and data validation audit log.
 """
 import os
 from datetime import date, datetime
@@ -17,14 +17,12 @@ def _sb() -> Client:
 
 
 def _clean(rows: list) -> list:
-    """Strip None values to avoid Supabase type errors."""
     return [{k: v for k, v in row.items() if v is not None} for row in rows]
 
 
 # ── Game logs ──────────────────────────────────────────────────────────────────
 
 def get_last_game_date(sport: str) -> Optional[date]:
-    """Most recent game_date stored for a sport."""
     try:
         res = (_sb().table(_GAME_TABLES[sport])
                .select("game_date").order("game_date", desc=True).limit(1).execute())
@@ -36,7 +34,6 @@ def get_last_game_date(sport: str) -> Optional[date]:
 
 
 def upsert_game_logs(sport: str, logs: list):
-    """Upsert game log dicts. game_id is the conflict key."""
     if not logs:
         return
     sb = _sb()
@@ -52,7 +49,6 @@ def upsert_game_logs(sport: str, logs: list):
 
 def get_game_logs(sport: str, since_date: Optional[date] = None,
                   limit: int = 10000) -> list:
-    """Retrieve stored game logs sorted by date ascending."""
     try:
         q = _sb().table(_GAME_TABLES[sport]).select("*").order("game_date").limit(limit)
         if since_date:
@@ -63,10 +59,35 @@ def get_game_logs(sport: str, since_date: Optional[date] = None,
         return []
 
 
+def find_game_by_teams_and_date(sport: str, team1: str, team2: str,
+                                 game_date: str) -> Optional[dict]:
+    """Find a game record matching two teams on a specific date (fuzzy team name match)."""
+    from rapidfuzz import fuzz
+    try:
+        table = _GAME_TABLES.get(sport)
+        if not table:
+            return None
+        rows = (_sb().table(table)
+                .select("game_id,game_date,home_team,away_team,game_start_time")
+                .eq("game_date", game_date).execute().data)
+        best, best_score = None, 0.0
+        for row in rows:
+            home = row.get("home_team", "")
+            away = row.get("away_team", "")
+            score = (max(fuzz.WRatio(team1, home), fuzz.WRatio(team2, home)) +
+                     max(fuzz.WRatio(team1, away), fuzz.WRatio(team2, away))) / 200.0
+            if score > best_score:
+                best_score = score
+                best = row
+        return best if best_score >= 0.70 else None
+    except Exception as exc:
+        print(f"find_game_by_teams_and_date error: {exc}")
+        return None
+
+
 # ── Elo ratings ────────────────────────────────────────────────────────────────
 
 def upsert_elo_ratings(sport: str, ratings: dict):
-    """Upsert {team: elo} into elo_ratings table."""
     if not ratings:
         return
     today = str(datetime.utcnow().date())
@@ -81,7 +102,6 @@ def upsert_elo_ratings(sport: str, ratings: dict):
 
 
 def get_elo_ratings(sport: str) -> dict:
-    """Return {team: elo} for a sport."""
     try:
         res = _sb().table("elo_ratings").select("team,elo").eq("sport", sport).execute()
         return {r["team"]: r["elo"] for r in res.data}
@@ -92,10 +112,6 @@ def get_elo_ratings(sport: str) -> dict:
 # ── NBA lineup stats ───────────────────────────────────────────────────────────
 
 def upsert_lineup_stats(sport: str, records: list):
-    """
-    Upsert 5-man lineup net ratings.
-    Each record: {id, sport, season, team, lineup, net_rating, possessions}.
-    """
     if not records:
         return
     sb = _sb()
@@ -108,7 +124,6 @@ def upsert_lineup_stats(sport: str, records: list):
 
 
 def get_lineup_net_rating(team: str, season: int) -> float:
-    """Best 5-man lineup net rating for a team in a season."""
     try:
         res = (_sb().table("nba_lineup_stats")
                .select("net_rating").eq("team", team).eq("season", season)
@@ -123,10 +138,6 @@ def get_lineup_net_rating(team: str, season: int) -> float:
 # ── Referee tendencies ─────────────────────────────────────────────────────────
 
 def upsert_referee_tendencies(records: list):
-    """
-    Upsert referee tendency records.
-    Each record: {id, sport, referee, pace_factor, foul_rate, run_factor, games_officiated}.
-    """
     if not records:
         return
     sb = _sb()
@@ -139,11 +150,9 @@ def upsert_referee_tendencies(records: list):
 
 
 def get_referee_tendency(sport: str, referee: str) -> dict:
-    """Look up a referee's tendency stats."""
     ref_id = f"{sport}_{referee}".replace(" ", "_")[:200]
     try:
-        res = (_sb().table("referee_tendencies")
-               .select("*").eq("id", ref_id).execute())
+        res = (_sb().table("referee_tendencies").select("*").eq("id", ref_id).execute())
         if res.data:
             return res.data[0]
     except Exception:
@@ -154,10 +163,6 @@ def get_referee_tendency(sport: str, referee: str) -> dict:
 # ── Pitcher-batter matchups ────────────────────────────────────────────────────
 
 def upsert_pitcher_matchups(records: list):
-    """
-    Upsert pitcher-batter matchup stats.
-    Each record: {id, pitcher, batter, ab, hits, k, bb, hr, matchup_win_rate}.
-    """
     if not records:
         return
     sb = _sb()
@@ -170,7 +175,6 @@ def upsert_pitcher_matchups(records: list):
 
 
 def get_pitcher_batter_matchup_rate(pitcher: str, batter: str) -> float:
-    """Historical matchup win rate for a specific pitcher vs batter."""
     mid = f"{pitcher}_{batter}".replace(" ", "_")[:200]
     try:
         res = (_sb().table("pitcher_matchup_stats")
@@ -185,10 +189,6 @@ def get_pitcher_batter_matchup_rate(pitcher: str, batter: str) -> float:
 # ── Weather cache ──────────────────────────────────────────────────────────────
 
 def upsert_weather_cache(records: list):
-    """
-    Cache weather per venue per date to avoid repeated Open-Meteo calls.
-    Each record: {id, venue, game_date, temp_max, precip_sum, windspeed_max}.
-    """
     if not records:
         return
     sb = _sb()
@@ -201,13 +201,162 @@ def upsert_weather_cache(records: list):
 
 
 def get_cached_weather(venue: str, game_date: str) -> Optional[dict]:
-    """Look up cached weather data."""
     wid = f"{venue}_{game_date}"
     try:
-        res = (_sb().table("weather_cache")
-               .select("*").eq("id", wid).execute())
+        res = (_sb().table("weather_cache").select("*").eq("id", wid).execute())
         if res.data:
             return res.data[0]
     except Exception:
         pass
     return None
+
+
+# ── Kalshi market data ─────────────────────────────────────────────────────────
+
+def upsert_kalshi_price_history(records: list):
+    if not records:
+        return
+    sb = _sb()
+    for i in range(0, len(records), 500):
+        chunk = _clean(records[i:i + 500])
+        try:
+            sb.table("kalshi_price_history").upsert(chunk).execute()
+        except Exception as exc:
+            print(f"upsert_kalshi_price_history error chunk {i}: {exc}")
+
+
+def upsert_kalshi_trades(records: list):
+    if not records:
+        return
+    sb = _sb()
+    for i in range(0, len(records), 500):
+        chunk = _clean(records[i:i + 500])
+        try:
+            sb.table("kalshi_trades").upsert(chunk, on_conflict="id").execute()
+        except Exception as exc:
+            print(f"upsert_kalshi_trades error chunk {i}: {exc}")
+
+
+def upsert_kalshi_game_matches(records: list):
+    if not records:
+        return
+    sb = _sb()
+    for i in range(0, len(records), 500):
+        chunk = _clean(records[i:i + 500])
+        try:
+            sb.table("kalshi_game_matches").upsert(chunk, on_conflict="kalshi_ticker").execute()
+        except Exception as exc:
+            print(f"upsert_kalshi_game_matches error: {exc}")
+
+
+# ── Polymarket data ────────────────────────────────────────────────────────────
+
+def upsert_polymarket_price_history(records: list):
+    if not records:
+        return
+    sb = _sb()
+    for i in range(0, len(records), 500):
+        chunk = _clean(records[i:i + 500])
+        try:
+            sb.table("polymarket_price_history").upsert(chunk).execute()
+        except Exception as exc:
+            print(f"upsert_polymarket_price_history error chunk {i}: {exc}")
+
+
+def upsert_polymarket_trades(records: list):
+    if not records:
+        return
+    sb = _sb()
+    for i in range(0, len(records), 500):
+        chunk = _clean(records[i:i + 500])
+        try:
+            sb.table("polymarket_trades").upsert(chunk, on_conflict="id").execute()
+        except Exception as exc:
+            print(f"upsert_polymarket_trades error chunk {i}: {exc}")
+
+
+def upsert_polymarket_game_matches(records: list):
+    if not records:
+        return
+    sb = _sb()
+    for i in range(0, len(records), 500):
+        chunk = _clean(records[i:i + 500])
+        try:
+            sb.table("polymarket_game_matches").upsert(chunk, on_conflict="market_id").execute()
+        except Exception as exc:
+            print(f"upsert_polymarket_game_matches error: {exc}")
+
+
+def get_market_features_for_sport(sport: str) -> dict:
+    """Return {espn_game_id: market_feature_dict} for enriching game log records."""
+    result: dict = {}
+    sb = _sb()
+
+    try:
+        rows = (sb.table("kalshi_game_matches")
+                  .select("*").eq("sport", sport).execute().data)
+        for r in rows:
+            gid = r.get("espn_game_id", "")
+            if not gid:
+                continue
+            if gid not in result:
+                result[gid] = {}
+            result[gid].update({
+                "kalshi_open_price": r.get("open_price") or 0.5,
+                "kalshi_close_price": r.get("close_price") or 0.5,
+                "kalshi_price_movement": r.get("price_movement") or 0.0,
+                "kalshi_total_volume": r.get("total_volume") or 0.0,
+                "kalshi_last_hour_volume": r.get("last_hour_volume") or 0.0,
+                "kalshi_price_at_tipoff": r.get("price_at_tipoff") or 0.5,
+                "kalshi_max_single_move": r.get("max_single_move") or 0.0,
+                "kalshi_days_open": r.get("days_open") or 0,
+                "kalshi_overround": r.get("overround") or 0.0,
+            })
+    except Exception as exc:
+        print(f"get_market_features (kalshi/{sport}) error: {exc}")
+
+    try:
+        rows = (sb.table("polymarket_game_matches")
+                  .select("*").eq("sport", sport).execute().data)
+        for r in rows:
+            gid = r.get("espn_game_id", "")
+            if not gid:
+                continue
+            if gid not in result:
+                result[gid] = {}
+            prev = result[gid]
+            k_vol = float(prev.get("kalshi_total_volume") or 0)
+            p_vol = float(r.get("total_volume") or 0)
+            k_close = float(prev.get("kalshi_close_price") or 0.5)
+            p_close = float(r.get("close_price") or 0.5)
+            result[gid].update({
+                "poly_open_price": r.get("open_price") or 0.5,
+                "poly_close_price": p_close,
+                "poly_price_movement": r.get("price_movement") or 0.0,
+                "poly_total_volume": p_vol,
+                "poly_last_hour_volume": r.get("last_hour_volume") or 0.0,
+                "poly_price_at_tipoff": r.get("price_at_tipoff") or 0.5,
+                "poly_max_single_move": r.get("max_single_move") or 0.0,
+                "poly_days_open": r.get("days_open") or 0,
+                "kalshi_vs_poly_spread": k_close - p_close,
+                "kalshi_vs_poly_volume_ratio": (k_vol / (p_vol + 1e-6)
+                                                if p_vol > 0 else 0.0),
+            })
+    except Exception as exc:
+        print(f"get_market_features (polymarket/{sport}) error: {exc}")
+
+    return result
+
+
+# ── Data quality audit ─────────────────────────────────────────────────────────
+
+def log_dropped_rows(records: list):
+    if not records:
+        return
+    sb = _sb()
+    for i in range(0, len(records), 500):
+        chunk = records[i:i + 500]
+        try:
+            sb.table("dropped_rows").insert(chunk).execute()
+        except Exception as exc:
+            print(f"log_dropped_rows error chunk {i}: {exc}")
