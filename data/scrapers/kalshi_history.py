@@ -252,8 +252,14 @@ def ingest_kalshi_history() -> dict:
 
         match = match_market_to_game(title=title, close_time=close_time,
                                      market_id=ticker, source="kalshi")
-        game_start_time = (match.get("game_start_time", close_time)
-                           if match else close_time)
+
+        # Skip price/trade API calls for non-game markets (mentions, props, etc.)
+        if not match:
+            if (i + 1) % 1000 == 0:
+                print(f"[Kalshi] scanned {i+1}/{len(all_markets)} markets...")
+            continue
+
+        game_start_time = match.get("game_start_time", close_time)
 
         history = get_market_price_history(ticker)
         feats = compute_market_features(history, game_start_time) if history else {}
@@ -267,7 +273,7 @@ def ingest_kalshi_history() -> dict:
                 "yes_price": _norm_price(h.get("yes_price")),
                 "no_price": _norm_price(h.get("no_price")),
                 "volume": int(h.get("volume") or 0),
-                "game_id": ticker if match else None,
+                "game_id": ticker,
             })
 
         trades = get_market_trades(ticker)
@@ -283,32 +289,30 @@ def ingest_kalshi_history() -> dict:
                 "taker_side": t.get("taker_side", ""),
             })
 
-        if match:
-            match_records.append({
-                "kalshi_ticker": ticker,
-                "espn_game_id": match.get("espn_game_id", ""),
-                "sport": match.get("sport", ""),
-                "game_date": match.get("game_date", ""),
-                "home_team": match.get("home_team", ""),
-                "away_team": match.get("away_team", ""),
-                "game_start_time": game_start_time,
-                "match_confidence_score": match.get("match_confidence_score", 0.0),
-                **feats,
-            })
+        match_records.append({
+            "kalshi_ticker": ticker,
+            "espn_game_id": match.get("espn_game_id", ""),
+            "sport": match.get("sport", ""),
+            "game_date": match.get("game_date", ""),
+            "home_team": match.get("home_team", ""),
+            "away_team": match.get("away_team", ""),
+            "game_start_time": game_start_time,
+            "match_confidence_score": match.get("match_confidence_score", 0.0),
+            **feats,
+        })
 
         if len(price_buf) >= 5000:
             upsert_kalshi_price_history(price_buf); price_buf = []
         if len(trade_buf) >= 5000:
             upsert_kalshi_trades(trade_buf); trade_buf = []
         if (i + 1) % 100 == 0:
-            print(f"[Kalshi] {i+1}/{len(all_markets)} markets processed")
-            time.sleep(0.3)
+            print(f"[Kalshi] {i+1}/{len(all_markets)} markets processed, {len(match_records)} matched")
 
     if price_buf: upsert_kalshi_price_history(price_buf)
     if trade_buf: upsert_kalshi_trades(trade_buf)
     if match_records: upsert_kalshi_game_matches(match_records)
 
-    print(f"[Kalshi] Done: {len(all_markets)} markets, {total_prices} price ticks, "
+    print(f"[Kalshi] Done: {len(all_markets)} markets scanned, {total_prices} price ticks, "
           f"{total_trades} trades, {len(match_records)} game matches")
     return {"markets": len(all_markets), "price_records": total_prices,
             "trades": total_trades, "matches": len(match_records)}
