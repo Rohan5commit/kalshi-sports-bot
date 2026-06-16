@@ -260,13 +260,16 @@ def ingest_kalshi_history() -> dict:
         title = market.get("title") or market.get("subtitle", "")
         close_time = market.get("close_time") or market.get("expiration_time", "")
 
+        # Fast pre-filter: game markets always contain "vs" or "@" in title
+        title_lower = title.lower()
+        if " vs" not in title_lower and " @ " not in title_lower:
+            if (i + 1) % 10000 == 0:
+                print(f"[Kalshi] scanned {i+1}/{len(all_markets)} markets...")
+            continue
+
         match = match_market_to_game(title=title, close_time=close_time,
                                      market_id=ticker, source="kalshi")
-
-        # Skip price/trade API calls for non-game markets (mentions, props, etc.)
         if not match:
-            if (i + 1) % 1000 == 0:
-                print(f"[Kalshi] scanned {i+1}/{len(all_markets)} markets...")
             continue
 
         game_start_time = match.get("game_start_time", close_time)
