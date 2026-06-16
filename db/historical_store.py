@@ -94,7 +94,7 @@ def find_game_by_teams_and_date(sport: str, team1: str, team2: str,
         if not table:
             return None
         rows = (_sb().table(table)
-                .select("game_id,game_date,home_team,away_team,game_start_time")
+                .select("game_id,game_date,home_team,away_team")
                 .eq("game_date", game_date).execute().data)
         if not rows:
             rows = _espn_fallback_games(sport, game_date)
