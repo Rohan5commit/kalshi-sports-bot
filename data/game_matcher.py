@@ -152,12 +152,28 @@ def _resolve_team(raw: str) -> Optional[tuple]:
     return None
 
 
+_TITLE_JUNK = re.compile(
+    r"\s+(winner|loser|wins|win|loses|first half|second half|moneyline|"
+    r"spread|total|over|under|game \d+|series|pro football|basketball|"
+    r"baseball|hockey|soccer|match|result|coverage|\?).*$",
+    re.I
+)
+
+
+def _clean_team_raw(s: str) -> str:
+    return _TITLE_JUNK.sub("", s).strip()
+
+
 def extract_teams_from_title(title: str) -> list:
     cleaned = re.sub(r"[^\w\s@]", " ", title).strip()
-    vs_match = re.search(r"(.+?)\s+(?:vs?\.?\s+|@\s*)(.+?)(?:\s*[-|]|\s*$)", cleaned, re.I)
+    # Matches: "vs", "v.", "@", "at" as team separators
+    vs_match = re.search(
+        r"(.+?)\s+(?:vs?\.?\s+|@\s*|\bat\s+)(.+?)(?:\s*[-|]|\s*$)",
+        cleaned, re.I
+    )
     if vs_match:
-        t1 = _resolve_team(vs_match.group(1).strip())
-        t2 = _resolve_team(vs_match.group(2).strip())
+        t1 = _resolve_team(_clean_team_raw(vs_match.group(1).strip()))
+        t2 = _resolve_team(_clean_team_raw(vs_match.group(2).strip()))
         if t1 and t2:
             return [t1, t2]
     found, seen = [], set()
