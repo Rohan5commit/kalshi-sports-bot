@@ -158,9 +158,11 @@ _TITLE_JUNK = re.compile(
     r"baseball|hockey|soccer|match|result|coverage|\?).*$",
     re.I
 )
+_LEAD_JUNK = re.compile(r"^(?:game\s+\d+\s*[:\-]?\s*|match\s+\d+\s*[:\-]?\s*)", re.I)
 
 
 def _clean_team_raw(s: str) -> str:
+    s = _LEAD_JUNK.sub("", s)
     return _TITLE_JUNK.sub("", s).strip()
 
 
@@ -231,3 +233,4 @@ def match_market_to_game(title: str, close_time: str,
                 "match_confidence_score": confidence,
             }
     return None
+
