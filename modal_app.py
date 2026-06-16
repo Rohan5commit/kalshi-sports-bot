@@ -427,12 +427,55 @@ def send_daily_email():
                   tb=traceback.format_exc(), run_date=run_date)
 
 
-# ── 4. Initial setup ──────────────────────────────────────────────────────────
+# ── 4. Per-sport pipeline (runs in its own container for parallelism) ─────────
 
 @app.function(
     image=image, secrets=secrets,
     volumes={VOLUME_PATH: model_volume},
-    timeout=21600,  # 6 hours: NBA PBP+shots (~3h) + NFL participation (~1h) + MLB Statcast (~2h)
+    timeout=7200,  # 2h per sport container
+)
+def _run_sport_pipeline(sport: str):
+    """Load + train one sport in an isolated container. Spawned in parallel by initial_setup."""
+    if sport == "NBA":
+        try:
+            print("\n=== NBA DATA PIPELINE ===")
+            logs = _load_nba_data()
+            print(f"[NBA] Total logs: {len(logs)}")
+            if logs:
+                _train_models_for_sport("NBA", logs)
+        except Exception as exc:
+            print(f"NBA pipeline error: {exc}\n{traceback.format_exc()}")
+
+    elif sport == "NFL":
+        try:
+            print("\n=== NFL DATA PIPELINE ===")
+            logs = _load_nfl_data()
+            print(f"[NFL] Total logs: {len(logs)}")
+            if logs:
+                _train_models_for_sport("NFL", logs)
+        except Exception as exc:
+            print(f"NFL pipeline error: {exc}\n{traceback.format_exc()}")
+
+    elif sport == "MLB":
+        try:
+            print("\n=== MLB DATA PIPELINE ===")
+            logs = _load_mlb_data()
+            print(f"[MLB] Total logs: {len(logs)}")
+            if logs:
+                _train_models_for_sport("MLB", logs)
+        except Exception as exc:
+            print(f"MLB pipeline error: {exc}\n{traceback.format_exc()}")
+
+    model_volume.commit()
+    print(f"[{sport}] Pipeline complete")
+
+
+# ── 5. Initial setup ──────────────────────────────────────────────────────────
+
+@app.function(
+    image=image, secrets=secrets,
+    volumes={VOLUME_PATH: model_volume},
+    timeout=9000,  # 2.5h — just coordinates parallel sport containers
 )
 def initial_setup():
     print("=== initial_setup ===")
@@ -444,40 +487,16 @@ def initial_setup():
     except Exception as exc:
         print(f"Table check: {exc}")
 
-    # ── NBA: Kaggle + nba_api full history (~3h) ──────────────────────────────
-    try:
-        print("\n=== NBA DATA PIPELINE ===")
-        nba_logs = _load_nba_data()
-        print(f"[NBA] Total logs: {len(nba_logs)}")
-        if nba_logs:
-            _train_models_for_sport("NBA", nba_logs)
-    except Exception as exc:
-        print(f"NBA pipeline error: {exc}\n{traceback.format_exc()}")
+    # Launch all three sport pipelines in parallel containers
+    print("=== Launching NBA + NFL + MLB in parallel ===")
+    futures = [
+        _run_sport_pipeline.spawn("NBA"),
+        _run_sport_pipeline.spawn("NFL"),
+        _run_sport_pipeline.spawn("MLB"),
+    ]
+    for f in futures:
+        f.get()  # wait for all three
 
-    # ── NFL: Kaggle + nfl_data_py + participation (~1.5h) ────────────────────
-    try:
-        print("\n=== NFL DATA PIPELINE ===")
-        nfl_logs = _load_nfl_data()
-        # Weather enrichment skipped in initial_setup — too slow (Open-Meteo 429s on bulk historical).
-        # _enrich_weather runs in morning_pipeline for current games (forecast, not archive).
-        print(f"[NFL] Total logs: {len(nfl_logs)}")
-        if nfl_logs:
-            _train_models_for_sport("NFL", nfl_logs)
-    except Exception as exc:
-        print(f"NFL pipeline error: {exc}\n{traceback.format_exc()}")
-
-    # ── MLB: Kaggle + Statcast 5 seasons (2019-2023) + FanGraphs (~2h) ───────
-    try:
-        print("\n=== MLB DATA PIPELINE ===")
-        mlb_logs = _load_mlb_data()
-        # Weather enrichment skipped in initial_setup — see NFL comment above.
-        print(f"[MLB] Total logs: {len(mlb_logs)}")
-        if mlb_logs:
-            _train_models_for_sport("MLB", mlb_logs)
-    except Exception as exc:
-        print(f"MLB pipeline error: {exc}\n{traceback.format_exc()}")
-
-    model_volume.commit()
     print("\n=== initial_setup complete ===")
 
 
