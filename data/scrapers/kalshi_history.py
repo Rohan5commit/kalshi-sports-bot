@@ -267,8 +267,10 @@ def ingest_kalshi_history() -> dict:
                 print(f"[Kalshi] scanned {i+1}/{len(all_markets)} markets...")
             continue
 
+        print(f"[Kalshi][DEBUG] pre-filter pass: {title!r}")
         match = match_market_to_game(title=title, close_time=close_time,
                                      market_id=ticker, source="kalshi")
+        print(f"[Kalshi][DEBUG] match result: {match}")
         if not match:
             continue
 
