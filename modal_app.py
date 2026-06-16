@@ -32,6 +32,7 @@ image = (
         "kaggle>=1.6",
         "lxml>=5.0",
         "feedparser>=6.0",
+        "rapidfuzz>=3.0",
     )
     .add_local_python_source(
         "config", "data", "db", "models", "trading", "reporting",
@@ -56,7 +57,6 @@ VOLUME_PATH = "/models"
 # ── Training helper ────────────────────────────────────────────────────────────
 
 def _train_models_for_sport(sport: str, logs: list):
-    """Full train pipeline for one sport given pre-loaded game logs."""
     from models import xgboost_model, bayesian_model, meta_learner, calibration
     from data.features import build_training_dataset, compute_elo_series
     from db.historical_store import upsert_elo_ratings
@@ -104,19 +104,12 @@ def _train_models_for_sport(sport: str, logs: list):
 # ── Data loading helpers ───────────────────────────────────────────────────────
 
 def _load_nba_data(incremental_from=None) -> list:
-    """
-    Full NBA data pipeline:
-    1. Kaggle bulk load (nathanlauga, wyattowalsh/basketball, NBA shot logs)
-    2. nba_api full history: LeagueGameLog + PlayByPlayV2 + ShotChartDetail +
-       PlayerDashPtStats + TeamDashLineups (1996-2024, ~3h with rate limiting)
-    """
     from data.scrapers.nba import ingest_full_history, kaggle_to_game_logs, wyattowalsh_to_game_logs
     from data.scrapers.kaggle_loader import get_nba_games, get_nba_full, get_nba_shot_logs
     from db.historical_store import upsert_game_logs
 
     all_logs = []
 
-    # ── Kaggle: nathanlauga/nba-games ──────────────────────────────────────────
     try:
         print("[NBA] Kaggle nathanlauga/nba-games...")
         df = get_nba_games()
@@ -129,11 +122,11 @@ def _load_nba_data(incremental_from=None) -> list:
     except Exception as exc:
         print(f"[NBA] Kaggle nathanlauga error: {exc}")
 
-    # ── Kaggle: wyattowalsh/basketball ────────────────────────────────────────
     try:
         print("[NBA] Kaggle wyattowalsh/basketball...")
         datasets = get_nba_full()
-        game_df = datasets.get("game.csv", datasets.get(next((k for k in datasets if "game" in k.lower()), ""), None))
+        game_df = datasets.get("game.csv", datasets.get(
+            next((k for k in datasets if "game" in k.lower()), ""), None))
         if game_df is not None and not game_df.empty:
             wyatto_logs = wyattowalsh_to_game_logs(game_df)
             if incremental_from:
@@ -144,30 +137,18 @@ def _load_nba_data(incremental_from=None) -> list:
     except Exception as exc:
         print(f"[NBA] Kaggle wyattowalsh error: {exc}")
 
-    # ── nba_api skipped for initial setup ────────────────────────────────────
-    # stats.nba.com blocks cloud IPs; LeagueGameFinder + per-game calls all timeout.
-    # 26K Kaggle games (already upserted above) are sufficient to train the initial model.
-    # Re-enable ingest_full_history in nightly_retrain once a residential proxy is available.
     print("[NBA] nba_api skipped (cloud IP block) — training on Kaggle game logs")
-
     print(f"[NBA] Total unique game records: {len(all_logs)}")
     return all_logs
 
 
 def _load_nfl_data(incremental_from=None) -> list:
-    """
-    Full NFL data pipeline:
-    1. Kaggle: historical scores (1966-2020) + PBP (2009-2016)
-    2. nfl_data_py: schedules + full PBP (1999-2024) + participation (~50M rows) +
-       NextGen stats + rosters + injuries + contracts
-    """
     from data.scrapers.nfl import ingest_full_history
     from data.scrapers.kaggle_loader import get_nfl_scores, get_nfl_pbp, nfl_scores_to_game_logs
     from db.historical_store import upsert_game_logs
 
     all_logs = []
 
-    # ── Kaggle: historical NFL scores ─────────────────────────────────────────
     try:
         print("[NFL] Kaggle tobycrabtree/nfl-scores...")
         scores_df = get_nfl_scores()
@@ -180,10 +161,7 @@ def _load_nfl_data(incremental_from=None) -> list:
     except Exception as exc:
         print(f"[NFL] Kaggle NFL scores error: {exc}")
 
-    # ── nfl_data_py: full history with all enrichment (~1-2h) ────────────────
     print(f"[NFL] nfl_data_py: {NFL_SEASONS[0]}-{NFL_SEASONS[-1]} ({len(NFL_SEASONS)} seasons)")
-    # NextGen/injuries/contracts skipped in initial_setup — hang indefinitely on Modal network.
-    print("[NFL] Downloading schedules + PBP + EPA (nextgen/injuries/contracts skipped for initial run)...")
     try:
         nfl_logs = ingest_full_history(
             seasons=NFL_SEASONS,
@@ -204,19 +182,12 @@ def _load_nfl_data(incremental_from=None) -> list:
 
 
 def _load_mlb_data(incremental_from=None) -> list:
-    """
-    Full MLB data pipeline:
-    1. Kaggle: MLB season stats + game logs
-    2. pybaseball: 8 seasons Statcast (2015-2023) + FanGraphs batting/pitching
-    3. Pitcher-batter matchup aggregation → Supabase
-    """
     from data.scrapers.mlb import ingest_full_history, statcast_to_game_logs
     from data.scrapers.kaggle_loader import get_mlb_season_stats, get_mlb_game_logs, mlb_game_logs_to_standard
     from db.historical_store import upsert_game_logs
 
     all_logs = []
 
-    # ── Kaggle: MLB historical game logs ──────────────────────────────────────
     try:
         print("[MLB] Kaggle saurabhshahane/mlb-game-log-dataset...")
         gl_df = get_mlb_game_logs()
@@ -229,14 +200,9 @@ def _load_mlb_data(incremental_from=None) -> list:
     except Exception as exc:
         print(f"[MLB] Kaggle MLB logs error: {exc}")
 
-    # ── pybaseball: 8 seasons Statcast + FanGraphs (~2-3h) ───────────────────
     print(f"[MLB] pybaseball Statcast: {MLB_SEASONS[0]}-{MLB_SEASONS[-1]} ({len(MLB_SEASONS)} seasons)")
-    print(f"[MLB] Expected: ~{len(MLB_SEASONS)*10}M pitches total, ~2-3h")
     try:
-        mlb_logs = ingest_full_history(
-            seasons=MLB_SEASONS,
-            incremental_from=incremental_from,
-        )
+        mlb_logs = ingest_full_history(seasons=MLB_SEASONS, incremental_from=incremental_from)
         if mlb_logs:
             upsert_game_logs("MLB", mlb_logs)
             all_logs.extend(mlb_logs)
@@ -249,10 +215,6 @@ def _load_mlb_data(incremental_from=None) -> list:
 
 
 def _enrich_weather(sport: str, game_logs: list) -> list:
-    """
-    Retroactively enrich game logs with historical weather data from Open-Meteo.
-    Only applies to outdoor NFL/MLB games. Caches results to Supabase.
-    """
     from data.scrapers.weather import get_weather_for_game, compute_weather_impact_score
     from db.historical_store import get_cached_weather, upsert_weather_cache
 
@@ -267,9 +229,7 @@ def _enrich_weather(sport: str, game_logs: list) -> list:
         if not home_team or not game_date:
             continue
         if g.get("weather_impact_score") is not None:
-            continue  # already enriched
-
-        # Check cache first
+            continue
         venue_key = f"{sport}_{home_team}"
         cached = get_cached_weather(venue_key, game_date)
         if cached:
@@ -283,7 +243,6 @@ def _enrich_weather(sport: str, game_logs: list) -> list:
                     "game_date": game_date,
                     **{k: v for k, v in w.items() if v is not None},
                 })
-
         if w:
             g["weather_impact_score"] = compute_weather_impact_score(w)
             enriched_count += 1
@@ -427,17 +386,14 @@ def send_daily_email():
                   tb=traceback.format_exc(), run_date=run_date)
 
 
-# ── 4. Per-sport pipeline (runs in its own container for parallelism) ─────────
+# ── 4. Per-sport pipeline ─────────────────────────────────────────────────────
 
 @app.function(
     image=image, secrets=secrets,
     volumes={VOLUME_PATH: model_volume},
-    timeout=7200,
-    cpu=8,
-    memory=16384,  # 16 GB — Statcast DataFrames are large; XGBoost uses all 8 CPUs
+    timeout=7200, cpu=8, memory=16384,
 )
 def _run_sport_pipeline(sport: str):
-    """Load + train one sport in an isolated container. Spawned in parallel by initial_setup."""
     if sport == "NBA":
         try:
             print("\n=== NBA DATA PIPELINE ===")
@@ -472,12 +428,98 @@ def _run_sport_pipeline(sport: str):
     print(f"[{sport}] Pipeline complete")
 
 
-# ── 5. Initial setup ──────────────────────────────────────────────────────────
+# ── 5. Market data pipeline ───────────────────────────────────────────────────
+
+@app.function(
+    image=image, secrets=secrets,
+    timeout=3600, cpu=4, memory=8192,
+)
+def _run_market_pipeline():
+    """Ingest Kalshi + Polymarket historical data and match to game records."""
+    from data.scrapers.kalshi_history import ingest_kalshi_history
+    from data.scrapers.polymarket_history import ingest_polymarket_history
+
+    print("\n=== KALSHI PIPELINE ===")
+    try:
+        k_stats = ingest_kalshi_history()
+        print(f"[Kalshi] Complete: {k_stats}")
+    except Exception as exc:
+        print(f"[Kalshi] Pipeline error: {exc}\n{traceback.format_exc()}")
+
+    print("\n=== POLYMARKET PIPELINE ===")
+    try:
+        p_stats = ingest_polymarket_history()
+        print(f"[Polymarket] Complete: {p_stats}")
+    except Exception as exc:
+        print(f"[Polymarket] Pipeline error: {exc}\n{traceback.format_exc()}")
+
+    print("[Market] Pipeline complete")
+
+
+# ── 6. Sport retrain with market features ─────────────────────────────────────
 
 @app.function(
     image=image, secrets=secrets,
     volumes={VOLUME_PATH: model_volume},
-    timeout=9000,  # 2.5h — just coordinates parallel sport containers
+    timeout=3600, cpu=8, memory=16384,
+)
+def _run_sport_retrain(sport: str):
+    """Retrain one sport model using existing game logs + newly ingested market features."""
+    from db.historical_store import get_game_logs
+    try:
+        print(f"\n=== [{sport}] RETRAIN WITH MARKET FEATURES ===")
+        logs = get_game_logs(sport)
+        print(f"[{sport}] Loaded {len(logs)} logs from Supabase")
+        if logs:
+            _train_models_for_sport(sport, logs)
+        else:
+            print(f"[{sport}] No logs found — skipping")
+    except Exception as exc:
+        print(f"[{sport}] Retrain error: {exc}\n{traceback.format_exc()}")
+    model_volume.commit()
+    print(f"[{sport}] Market retrain complete")
+
+
+# ── 7. Market retrain orchestrator ────────────────────────────────────────────
+
+@app.function(
+    image=image, secrets=secrets,
+    volumes={VOLUME_PATH: model_volume},
+    timeout=7200,
+)
+def run_market_retrain():
+    """
+    Targeted pipeline: ingest Kalshi+Polymarket data then retrain all models.
+    Run this after initial_setup has already loaded game logs.
+    Total time ~30-45 min (market ingestion ~15 min + parallel retrain ~15 min).
+    """
+    print("=== run_market_retrain ===")
+
+    # Step 1: ingest market data (sequential — game matching needs game logs in Supabase)
+    print("=== Step 1: Market data ingestion ===")
+    _run_market_pipeline.remote()
+    print("=== Market ingestion complete ===")
+
+    # Step 2: retrain all 3 sports in parallel with market features enriched
+    print("=== Step 2: Parallel retrain with market features ===")
+    futures = [
+        _run_sport_retrain.spawn("NBA"),
+        _run_sport_retrain.spawn("NFL"),
+        _run_sport_retrain.spawn("MLB"),
+    ]
+    for f in futures:
+        f.get()
+
+    model_volume.commit()
+    print("\n=== run_market_retrain complete ===")
+
+
+# ── 8. Initial setup ──────────────────────────────────────────────────────────
+
+@app.function(
+    image=image, secrets=secrets,
+    volumes={VOLUME_PATH: model_volume},
+    timeout=14400,  # 4h: sport pipelines (~45m) + market (~20m) + retrain (~15m)
 )
 def initial_setup():
     print("=== initial_setup ===")
@@ -489,15 +531,35 @@ def initial_setup():
     except Exception as exc:
         print(f"Table check: {exc}")
 
-    # Launch all three sport pipelines in parallel containers
-    print("=== Launching NBA + NFL + MLB in parallel ===")
+    # Phase 1: sport data ingestion + initial model training (parallel containers)
+    print("=== Phase 1: NBA + NFL + MLB pipelines (parallel) ===")
     futures = [
         _run_sport_pipeline.spawn("NBA"),
         _run_sport_pipeline.spawn("NFL"),
         _run_sport_pipeline.spawn("MLB"),
     ]
     for f in futures:
-        f.get()  # wait for all three
+        f.get()
+    print("=== Phase 1 complete ===")
+
+    # Phase 2: market data ingestion (after game logs exist in Supabase for matching)
+    print("=== Phase 2: Market data ingestion ===")
+    try:
+        _run_market_pipeline.remote()
+        print("=== Phase 2 complete ===")
+    except Exception as exc:
+        print(f"Phase 2 market ingestion error: {exc}")
+
+    # Phase 3: retrain all sports with Kalshi+Polymarket features
+    print("=== Phase 3: Retrain with market features (parallel) ===")
+    futures = [
+        _run_sport_retrain.spawn("NBA"),
+        _run_sport_retrain.spawn("NFL"),
+        _run_sport_retrain.spawn("MLB"),
+    ]
+    for f in futures:
+        f.get()
+    print("=== Phase 3 complete ===")
 
     print("\n=== initial_setup complete ===")
 
