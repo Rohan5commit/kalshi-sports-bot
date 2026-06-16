@@ -4,6 +4,7 @@ Public API endpoints — zero authentication required.
 Uses GET /markets with series_ticker filter (demo + production compatible).
 """
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -221,14 +222,23 @@ def ingest_kalshi_history() -> dict:
     sports_series = get_all_series()
     print(f"[Kalshi] {len(sports_series)} sports series found")
 
+    # Parallel series fetch — 8 threads reduces ~60min sequential to ~8min
     all_markets = []
-    for s in sports_series:
-        ticker = s.get("ticker", "")
-        mkts = get_markets_for_series(ticker)
-        if mkts:
-            print(f"[Kalshi] {ticker}: {len(mkts)} markets")
-            all_markets.extend(mkts)
-        time.sleep(0.15)
+    completed = 0
+
+    def _fetch(ticker):
+        return ticker, get_markets_for_series(ticker)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(_fetch, s.get("ticker", "")): s for s in sports_series}
+        for fut in as_completed(futures):
+            ticker, mkts = fut.result()
+            completed += 1
+            if mkts:
+                print(f"[Kalshi] {ticker}: {len(mkts)} markets")
+                all_markets.extend(mkts)
+            if completed % 100 == 0:
+                print(f"[Kalshi] {completed}/{len(sports_series)} series fetched...")
 
     # If series approach yielded nothing, fall back to paginated scan
     if not all_markets:
