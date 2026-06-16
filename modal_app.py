@@ -432,7 +432,7 @@ def _run_sport_pipeline(sport: str):
 
 @app.function(
     image=image, secrets=secrets,
-    timeout=3600, cpu=4, memory=8192,
+    timeout=10800, cpu=4, memory=8192,
 )
 def _run_market_pipeline():
     """Ingest Kalshi + Polymarket historical data and match to game records."""
@@ -485,7 +485,7 @@ def _run_sport_retrain(sport: str):
 @app.function(
     image=image, secrets=secrets,
     volumes={VOLUME_PATH: model_volume},
-    timeout=7200,
+    timeout=14400,
 )
 def run_market_retrain():
     """
@@ -567,3 +567,4 @@ def initial_setup():
 @app.local_entrypoint()
 def main():
     print("Kalshi Sports Bot — run initial_setup once, then scheduled jobs take over")
+
