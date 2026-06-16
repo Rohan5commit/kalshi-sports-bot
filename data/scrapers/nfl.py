@@ -313,7 +313,10 @@ def compute_cap_spending(contracts_df: pd.DataFrame, team: str) -> float:
 
 # ── Full history ingestion ─────────────────────────────────────────────────────
 
-def ingest_full_history(seasons: list, incremental_from=None) -> list:
+def ingest_full_history(seasons: list, incremental_from=None,
+                        pull_nextgen: bool = True,
+                        pull_injuries: bool = True,
+                        pull_contracts: bool = True) -> list:
     """
     Master NFL ingestion: schedules → PBP EPA → participation → NextGen → injuries.
     Returns enriched game log dicts with all features.
@@ -357,58 +360,65 @@ def ingest_full_history(seasons: list, incremental_from=None) -> list:
     except Exception as exc:
         print(f"[NFL] Participation error: {exc}")
 
-    # NextGen receiving stats: separation
-    print("[NFL] Downloading NextGen receiving stats...")
-    try:
-        ng_recv = get_nextgen_stats(seasons, "receiving")
-        print(f"[NFL] NextGen receiving: {len(ng_recv):,} rows")
-        # Build team-level separation lookup
-        team_separation = {}
-        if not ng_recv.empty:
-            col_team = "team_abbr" if "team_abbr" in ng_recv.columns else "team"
-            if "avg_separation" in ng_recv.columns:
-                team_separation = ng_recv.groupby(col_team)["avg_separation"].mean().to_dict()
-        for g in game_logs:
-            g["home_nextgen_separation"] = float(team_separation.get(g.get("home_team", ""), 2.5))
-            g["away_nextgen_separation"] = float(team_separation.get(g.get("away_team", ""), 2.5))
-    except Exception as exc:
-        print(f"[NFL] NextGen error: {exc}")
+    # NextGen receiving + passing stats
+    if pull_nextgen:
+        print("[NFL] Downloading NextGen receiving stats...")
+        try:
+            ng_recv = get_nextgen_stats(seasons, "receiving")
+            print(f"[NFL] NextGen receiving: {len(ng_recv):,} rows")
+            team_separation = {}
+            if not ng_recv.empty:
+                col_team = "team_abbr" if "team_abbr" in ng_recv.columns else "team"
+                if "avg_separation" in ng_recv.columns:
+                    team_separation = ng_recv.groupby(col_team)["avg_separation"].mean().to_dict()
+            for g in game_logs:
+                g["home_nextgen_separation"] = float(team_separation.get(g.get("home_team", ""), 2.5))
+                g["away_nextgen_separation"] = float(team_separation.get(g.get("away_team", ""), 2.5))
+        except Exception as exc:
+            print(f"[NFL] NextGen receiving error: {exc}")
 
-    # NextGen passing: time to throw
-    print("[NFL] Downloading NextGen passing stats...")
-    try:
-        ng_pass = get_nextgen_stats(seasons, "passing")
-        team_ttt = {}
-        if not ng_pass.empty:
-            col_team = "team_abbr" if "team_abbr" in ng_pass.columns else "team"
-            if "avg_time_to_throw" in ng_pass.columns:
-                team_ttt = ng_pass.groupby(col_team)["avg_time_to_throw"].mean().to_dict()
-        for g in game_logs:
-            g["home_time_to_throw"] = float(team_ttt.get(g.get("home_team", ""), 2.7))
-            g["away_time_to_throw"] = float(team_ttt.get(g.get("away_team", ""), 2.7))
-    except Exception as exc:
-        print(f"[NFL] NextGen passing error: {exc}")
+        print("[NFL] Downloading NextGen passing stats...")
+        try:
+            ng_pass = get_nextgen_stats(seasons, "passing")
+            team_ttt = {}
+            if not ng_pass.empty:
+                col_team = "team_abbr" if "team_abbr" in ng_pass.columns else "team"
+                if "avg_time_to_throw" in ng_pass.columns:
+                    team_ttt = ng_pass.groupby(col_team)["avg_time_to_throw"].mean().to_dict()
+            for g in game_logs:
+                g["home_time_to_throw"] = float(team_ttt.get(g.get("home_team", ""), 2.7))
+                g["away_time_to_throw"] = float(team_ttt.get(g.get("away_team", ""), 2.7))
+        except Exception as exc:
+            print(f"[NFL] NextGen passing error: {exc}")
+    else:
+        print("[NFL] NextGen stats skipped")
 
     # Injuries
-    print("[NFL] Downloading injury data...")
-    try:
-        inj_df = get_injuries(seasons)
-        for g in game_logs:
-            g["home_injury_flag"] = get_injury_flags(inj_df, g.get("home_team", ""), g.get("game_date", ""))
-            g["away_injury_flag"] = get_injury_flags(inj_df, g.get("away_team", ""), g.get("game_date", ""))
-    except Exception as exc:
-        print(f"[NFL] Injury data error: {exc}")
+    if pull_injuries:
+        print("[NFL] Downloading injury data...")
+        try:
+            inj_df = get_injuries(seasons)
+            for g in game_logs:
+                g["home_injury_flag"] = get_injury_flags(inj_df, g.get("home_team", ""), g.get("game_date", ""))
+                g["away_injury_flag"] = get_injury_flags(inj_df, g.get("away_team", ""), g.get("game_date", ""))
+        except Exception as exc:
+            print(f"[NFL] Injury data error: {exc}")
+    else:
+        print("[NFL] Injuries skipped")
 
     # Contracts: cap spending ratio
-    print("[NFL] Downloading contract data...")
-    try:
-        contracts_df = get_contracts()
-        if not contracts_df.empty:
-            for g in game_logs:
-                g["home_cap_ratio"] = compute_cap_spending(contracts_df, g.get("home_team", ""))
-                g["away_cap_ratio"] = compute_cap_spending(contracts_df, g.get("away_team", ""))
-    except Exception as exc:
-        print(f"[NFL] Contracts error: {exc}")
+    if pull_contracts:
+        print("[NFL] Downloading contract data...")
+        try:
+            contracts_df = get_contracts()
+            if not contracts_df.empty:
+                for g in game_logs:
+                    g["home_cap_ratio"] = compute_cap_spending(contracts_df, g.get("home_team", ""))
+                    g["away_cap_ratio"] = compute_cap_spending(contracts_df, g.get("away_team", ""))
+        except Exception as exc:
+            print(f"[NFL] Contracts error: {exc}")
+    else:
+        print("[NFL] Contracts skipped")
 
     print(f"[NFL] Ingestion complete: {len(game_logs)} enriched game logs")
     return game_logs
