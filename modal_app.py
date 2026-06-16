@@ -432,7 +432,9 @@ def send_daily_email():
 @app.function(
     image=image, secrets=secrets,
     volumes={VOLUME_PATH: model_volume},
-    timeout=7200,  # 2h per sport container
+    timeout=7200,
+    cpu=8,
+    memory=16384,  # 16 GB — Statcast DataFrames are large; XGBoost uses all 8 CPUs
 )
 def _run_sport_pipeline(sport: str):
     """Load + train one sport in an isolated container. Spawned in parallel by initial_setup."""
