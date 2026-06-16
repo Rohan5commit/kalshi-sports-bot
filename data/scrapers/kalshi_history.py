@@ -1,6 +1,7 @@
 """
 data/scrapers/kalshi_history.py — Pull historical Kalshi sports markets.
-Uses public demo API — zero authentication required.
+Public API endpoints — zero authentication required.
+Uses GET /markets with series_ticker filter (demo + production compatible).
 """
 import time
 from datetime import datetime, timedelta, timezone
@@ -9,17 +10,18 @@ from typing import Optional
 import requests
 
 BASE = "https://demo-api.kalshi.co/trade-api/v2"
+PROD_BASE = "https://trading-api.kalshi.com/trade-api/v2"
 
 SPORTS_SERIES_PREFIXES = [
-    "NBA", "NFL", "MLB", "NHL", "NCAAFB", "NCAABB", "WNBA", "MLS",
+    "NBA", "NFL", "MLB", "NHL", "NCAA", "WNBA", "MLS",
     "EPL", "UFC", "BOXING", "TENNIS", "GOLF", "SOCCER",
 ]
 
 
-def _get(path: str, params: dict = None, retries: int = 3) -> dict:
+def _get(path: str, params: dict = None, retries: int = 3, base: str = BASE) -> dict:
     for attempt in range(retries):
         try:
-            r = requests.get(f"{BASE}{path}", params=params or {}, timeout=30)
+            r = requests.get(f"{base}{path}", params=params or {}, timeout=30)
             if r.status_code == 429:
                 time.sleep(5 * (attempt + 1))
                 continue
@@ -33,32 +35,83 @@ def _get(path: str, params: dict = None, retries: int = 3) -> dict:
 
 
 def get_all_series() -> list:
+    """Get all sports-relevant series from the /series endpoint."""
     try:
         data = _get("/series", {"limit": 200})
-        return data.get("series", [])
+        all_series = data.get("series", [])
+        # Filter to sports-relevant series
+        sports = [
+            s for s in all_series
+            if any(pfx in s.get("ticker", "").upper() for pfx in SPORTS_SERIES_PREFIXES)
+        ]
+        return sports
     except Exception as exc:
         print(f"[Kalshi] get_all_series error: {exc}")
         return []
 
 
-def get_series_markets(series_ticker: str) -> list:
+def get_markets_for_series(series_ticker: str) -> list:
+    """
+    Get all settled markets for a series using GET /markets?series_ticker=.
+    Falls back to trying without status filter if needed.
+    """
+    markets, cursor = [], None
+    while True:
+        params = {"limit": 200, "series_ticker": series_ticker, "status": "settled"}
+        if cursor:
+            params["cursor"] = cursor
+        try:
+            data = _get("/markets", params)
+        except Exception as exc:
+            print(f"[Kalshi] {series_ticker} markets error: {exc}")
+            break
+        batch = data.get("markets", [])
+        if not batch and not cursor:
+            # Try without status filter
+            try:
+                data2 = _get("/markets", {"limit": 200, "series_ticker": series_ticker})
+                batch = data2.get("markets", [])
+                markets.extend(batch)
+            except Exception:
+                pass
+            break
+        markets.extend(batch)
+        cursor = data.get("cursor")
+        if not cursor or not batch:
+            break
+    return markets
+
+
+def get_all_sports_markets_paginated() -> list:
+    """
+    Fall-through: GET /markets with pagination, filter by title for sports.
+    Used when series-level filtering yields nothing.
+    """
     markets, cursor, page = [], None, 0
+    sports_kw = ["nba", "nfl", "mlb", "nhl", "ncaa", "mls", "ufc", "playoffs",
+                 "championship", "super bowl", "world series"]
     while True:
         params = {"limit": 200, "status": "settled"}
         if cursor:
             params["cursor"] = cursor
         try:
-            data = _get(f"/series/{series_ticker}/markets", params)
+            data = _get("/markets", params)
         except Exception as exc:
-            print(f"[Kalshi] {series_ticker} error: {exc}")
+            print(f"[Kalshi] paginated markets error: {exc}")
             break
         batch = data.get("markets", [])
-        markets.extend(batch)
+        for m in batch:
+            title = (m.get("title") or m.get("subtitle") or "").lower()
+            ticker = m.get("ticker", "").upper()
+            if (any(kw in title for kw in sports_kw) or
+                    any(pfx in ticker for pfx in SPORTS_SERIES_PREFIXES)):
+                markets.append(m)
         cursor = data.get("cursor")
         page += 1
         if not cursor or not batch:
             break
-        if page % 5 == 0:
+        if page % 10 == 0:
+            print(f"[Kalshi] paginated: {page} pages, {len(markets)} sports markets so far")
             time.sleep(0.5)
     return markets
 
@@ -143,7 +196,6 @@ def compute_market_features(history: list, game_start_time: str) -> dict:
         at_tipoff = [t for t in timed if t[0] <= game_start]
         if at_tipoff:
             price_at_tipoff = at_tipoff[-1][1]
-
     last_no = timed[-1][2]
     overround = (timed[-1][1] + last_no - 1.0) if last_no > 0 else 0.0
 
@@ -165,26 +217,29 @@ def ingest_kalshi_history() -> dict:
     from db.historical_store import (upsert_kalshi_price_history, upsert_kalshi_trades,
                                      upsert_kalshi_game_matches)
 
-    print("[Kalshi] Discovering sports series...")
-    all_series = get_all_series()
-    sports_series = [
-        s["ticker"] for s in all_series
-        if any(pfx in s.get("ticker", "").upper() for pfx in SPORTS_SERIES_PREFIXES)
-    ] or SPORTS_SERIES_PREFIXES
-
-    print(f"[Kalshi] {len(sports_series)} sports series: {sports_series[:12]}")
+    print("[Kalshi] Fetching sports series...")
+    sports_series = get_all_series()
+    print(f"[Kalshi] {len(sports_series)} sports series found")
 
     all_markets = []
-    for sticker in sports_series:
-        try:
-            mkts = get_series_markets(sticker)
-            print(f"[Kalshi] {sticker}: {len(mkts)} markets")
+    for s in sports_series:
+        ticker = s.get("ticker", "")
+        mkts = get_markets_for_series(ticker)
+        if mkts:
+            print(f"[Kalshi] {ticker}: {len(mkts)} markets")
             all_markets.extend(mkts)
-            time.sleep(0.2)
-        except Exception as exc:
-            print(f"[Kalshi] {sticker} error: {exc}")
+        time.sleep(0.15)
+
+    # If series approach yielded nothing, fall back to paginated scan
+    if not all_markets:
+        print("[Kalshi] Series approach yielded 0 markets, trying paginated scan...")
+        all_markets = get_all_sports_markets_paginated()
 
     print(f"[Kalshi] Total markets: {len(all_markets)}")
+    if not all_markets:
+        print("[Kalshi] No markets found — Kalshi demo API may not have settled sports data")
+        return {"markets": 0, "price_records": 0, "trades": 0, "matches": 0}
+
     price_buf, trade_buf, match_records = [], [], []
     total_prices, total_trades = 0, 0
 
