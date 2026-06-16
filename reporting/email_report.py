@@ -1,6 +1,5 @@
 """
 reporting/email_report.py — Builds and sends the daily HTML email report via SMTP.
-Reads SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD from environment (smtp-secret).
 """
 import os
 import smtplib
@@ -29,18 +28,27 @@ def _fmt_usd(val: float) -> str:
     return f"${val:.2f}"
 
 
+def _get_dropped_rows_summary(run_date: date) -> dict:
+    try:
+        from data.data_sync_validator import get_dropped_rows_summary
+        return get_dropped_rows_summary(run_date)
+    except Exception:
+        return {}
+
+
 def _build_html(run_date: date) -> str:
     predictions = get_todays_predictions(run_date)
     trades = get_todays_trades(run_date)
     open_positions = get_open_trades()
     errors = get_todays_errors(run_date)
     threshold_events = get_todays_threshold_events(run_date)
+    dropped_summary = _get_dropped_rows_summary(run_date)
 
     pnl = compute_pnl(trades)
     bets = [t for t in trades]
     skipped = [p for p in predictions if p["decision"].startswith("skip")]
     sports_covered = list({p["sport"] for p in predictions})
-
+    total_dropped = sum(dropped_summary.values())
     pnl_class = "pnl-pos" if pnl >= 0 else "pnl-neg"
 
     html = f"""<!DOCTYPE html>
@@ -48,7 +56,7 @@ def _build_html(run_date: date) -> str:
 <head>
 <meta charset="utf-8">
 <style>
-  body {{ font-family: Arial, sans-serif; font-size: 14px; color: #222; max-width: 800px; margin: 0 auto; padding: 20px; }}
+  body {{ font-family: Arial, sans-serif; font-size: 14px; color: #222; max-width: 820px; margin: 0 auto; padding: 20px; }}
   h1 {{ color: #1a237e; border-bottom: 2px solid #1a237e; padding-bottom: 8px; }}
   h2 {{ color: #283593; margin-top: 28px; }}
   table {{ border-collapse: collapse; width: 100%; margin-top: 10px; }}
@@ -60,6 +68,8 @@ def _build_html(run_date: date) -> str:
   .stat-label {{ font-size: 11px; color: #555; margin-top: 4px; }}
   .pnl-pos {{ color: #2e7d32; font-weight: bold; }}
   .pnl-neg {{ color: #c62828; font-weight: bold; }}
+  .dq-ok {{ color: #2e7d32; }}
+  .dq-warn {{ color: #f57c00; font-weight: bold; }}
   pre {{ background: #f5f5f5; padding: 10px; border-radius: 4px; font-size: 11px; overflow-x: auto; }}
 </style>
 </head>
@@ -122,6 +132,21 @@ def _build_html(run_date: date) -> str:
     pnl_class2 = "pnl-pos" if pnl >= 0 else "pnl-neg"
     html += f"<h2>Running Demo P&amp;L</h2><p class='{pnl_class2}' style='font-size:20px;'>{_fmt_usd(pnl)}</p>"
 
+    # ── Data Quality section ───────────────────────────────────────────────────
+    html += "<h2>Data Quality</h2>"
+    dq_class = "dq-warn" if total_dropped > 0 else "dq-ok"
+    html += (f"<p class='{dq_class}'><strong>Dropped rows today: {total_dropped}</strong></p>")
+    if dropped_summary:
+        html += "<table><tr><th>Failed Check</th><th>Rows Dropped</th></tr>"
+        for check, count in sorted(dropped_summary.items(), key=lambda x: -x[1]):
+            html += f"<tr><td>{check}</td><td>{count}</td></tr>"
+        html += "</table>"
+        html += ("<p style='font-size:12px;color:#777;'>Rows are dropped when temporal "
+                 "sync rules are violated (lookahead bias prevention). "
+                 "Full audit in <code>dropped_rows</code> Supabase table.</p>")
+    else:
+        html += "<p class='dq-ok'>No rows dropped &mdash; all sync checks passed.</p>"
+
     if threshold_events:
         html += "<h2>Threshold Adjustments</h2><ul>"
         for ev in threshold_events:
@@ -145,19 +170,14 @@ def _build_html(run_date: date) -> str:
 
 
 def send_daily_report(run_date: Optional[date] = None):
-    """Build and send the daily HTML email via SMTP."""
     if run_date is None:
         run_date = datetime.utcnow().date()
 
     try:
         html_body = _build_html(run_date)
     except Exception as exc:
-        log_error(
-            context="email_report.build_html",
-            error_msg=str(exc),
-            tb=traceback.format_exc(),
-            run_date=run_date,
-        )
+        log_error(context="email_report.build_html", error_msg=str(exc),
+                  tb=traceback.format_exc(), run_date=run_date)
         html_body = f"<p>Error building report: {exc}</p>"
 
     smtp_host = os.environ.get("SMTP_HOST", SMTP_DEFAULT_HOST)
@@ -179,10 +199,6 @@ def send_daily_report(run_date: Optional[date] = None):
             server.sendmail(smtp_user, [REPORT_TO_EMAIL], msg.as_string())
         print(f"Email sent via {smtp_host}:{smtp_port} to {REPORT_TO_EMAIL}")
     except Exception as exc:
-        log_error(
-            context="email_report.send",
-            error_msg=str(exc),
-            tb=traceback.format_exc(),
-            run_date=run_date,
-        )
+        log_error(context="email_report.send", error_msg=str(exc),
+                  tb=traceback.format_exc(), run_date=run_date)
         raise
