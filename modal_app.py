@@ -182,11 +182,15 @@ def _load_nfl_data(incremental_from=None) -> list:
 
     # ── nfl_data_py: full history with all enrichment (~1-2h) ────────────────
     print(f"[NFL] nfl_data_py: {NFL_SEASONS[0]}-{NFL_SEASONS[-1]} ({len(NFL_SEASONS)} seasons)")
-    print("[NFL] Downloading participation data (~50M rows) — this will take ~20-40min")
+    # NextGen/injuries/contracts skipped in initial_setup — hang indefinitely on Modal network.
+    print("[NFL] Downloading schedules + PBP + EPA (nextgen/injuries/contracts skipped for initial run)...")
     try:
         nfl_logs = ingest_full_history(
             seasons=NFL_SEASONS,
             incremental_from=incremental_from,
+            pull_nextgen=False,
+            pull_injuries=False,
+            pull_contracts=False,
         )
         if nfl_logs:
             upsert_game_logs("NFL", nfl_logs)
