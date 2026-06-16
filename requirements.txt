@@ -11,3 +11,6 @@ nba_api>=1.4
 nfl_data_py>=0.3
 pybaseball>=2.2
 kaggle>=1.6
+lxml>=5.0
+feedparser>=6.0
+rapidfuzz>=3.0
