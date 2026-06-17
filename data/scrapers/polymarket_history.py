@@ -1,6 +1,8 @@
 """
 data/scrapers/polymarket_history.py — Pull historical Polymarket sports markets.
 CLOB API + Gamma API — fully public, zero authentication required.
+Gamma API returns: conditionId (str), clobTokenIds (list of str), question, endDateIso.
+CLOB price history and trades require clobTokenIds[0] (the yes-token ID).
 """
 import time
 from datetime import datetime, timedelta, timezone
@@ -49,35 +51,54 @@ def get_all_sports_markets() -> list:
                 m for m in batch
                 if any(kw in (m.get("question", "") + m.get("description", "")).lower()
                        for kw in SPORTS_KEYWORDS)
+                and (m.get("clobTokenIds") or m.get("conditionId"))
             ]
             markets.extend(sports_batch)
             if len(batch) < limit:
                 break
             page += 1
             time.sleep(0.3)
-        print(f"[Polymarket] Gamma API: {len(markets)} sports markets found")
+        print(f"[Polymarket] Gamma API: {len(markets)} sports markets with CLOB tokens")
     except Exception as exc:
         print(f"[Polymarket] Gamma API error: {exc}")
     return markets
 
 
-def get_market_price_history(market_id: str) -> list:
+def _parse_clob_ids(market: dict):
+    """Extract conditionId and yes-token clob_token_id from a Gamma market record."""
+    condition_id = market.get("conditionId") or str(market.get("id", ""))
+    raw = market.get("clobTokenIds") or []
+    if isinstance(raw, str):
+        import json
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = []
+    clob_yes_id = str(raw[0]) if raw else None
+    return condition_id, clob_yes_id
+
+
+def get_market_price_history(clob_token_id: str) -> list:
+    if not clob_token_id:
+        return []
     try:
         data = _get(CLOB, "/prices-history", {
-            "market_id": market_id,
+            "market_id": clob_token_id,
             "interval": "1h",
             "fidelity": 60,
         })
         return data.get("history", [])
     except Exception as exc:
-        print(f"[Polymarket] price_history {market_id[:20]}: {exc}")
+        print(f"[Polymarket] price_history {clob_token_id[:20]}: {exc}")
         return []
 
 
-def get_market_trades(market_id: str, max_pages: int = 50) -> list:
+def get_market_trades(clob_token_id: str, max_pages: int = 50) -> list:
+    if not clob_token_id:
+        return []
     trades, cursor, page = [], None, 0
     while page < max_pages:
-        params = {"market_id": market_id, "limit": 500}
+        params = {"market_id": clob_token_id, "limit": 500}
         if cursor:
             params["next_cursor"] = cursor
         try:
@@ -173,21 +194,21 @@ def ingest_polymarket_history() -> dict:
     total_prices, total_trades = 0, 0
 
     for i, market in enumerate(all_markets):
-        market_id = (market.get("condition_id") or market.get("id") or
-                     market.get("market_id", ""))
-        if not market_id:
+        condition_id, clob_yes_id = _parse_clob_ids(market)
+        if not condition_id:
             continue
+
         title = (market.get("question") or market.get("title") or
                  market.get("description", ""))
-        close_time = (market.get("end_date_iso") or market.get("end_date") or
-                      market.get("closed_time", ""))
+        close_time = (market.get("endDateIso") or market.get("end_date_iso") or
+                      market.get("closedTime") or market.get("closed_time", ""))
 
         match = match_market_to_game(title=title, close_time=close_time,
-                                     market_id=market_id, source="polymarket")
+                                     market_id=condition_id, source="polymarket")
         game_start_time = (match.get("game_start_time", close_time)
                            if match else close_time)
 
-        history = get_market_price_history(market_id)
+        history = get_market_price_history(clob_yes_id)
         feats = compute_market_features(history, game_start_time) if history else {}
         total_prices += len(history)
 
@@ -197,23 +218,23 @@ def ingest_polymarket_history() -> dict:
             vol = float(h.get("v") or h.get("volume") or 0)
             ts_dt = _parse_ts(ts)
             price_buf.append({
-                "market_id": market_id,
+                "market_id": condition_id,
                 "timestamp": ts_dt.isoformat() if ts_dt else None,
                 "yes_price": p,
                 "no_price": round(1.0 - p, 4),
                 "volume": vol,
-                "game_id": market_id if match else None,
+                "game_id": condition_id if match else None,
             })
 
-        trades = get_market_trades(market_id)
+        trades = get_market_trades(clob_yes_id)
         total_trades += len(trades)
         for t in trades:
-            trade_id = t.get("id") or f"{market_id}_{t.get('timestamp', i)}"
+            trade_id = t.get("id") or f"{condition_id}_{i}_{total_trades}"
             ts = t.get("timestamp") or ""
             ts_dt = _parse_ts(ts)
             trade_buf.append({
                 "id": str(trade_id),
-                "market_id": market_id,
+                "market_id": condition_id,
                 "timestamp": ts_dt.isoformat() if ts_dt else None,
                 "price": _norm_price(t.get("price")),
                 "size": float(t.get("size") or 0),
@@ -222,7 +243,7 @@ def ingest_polymarket_history() -> dict:
 
         if match:
             match_records.append({
-                "market_id": market_id,
+                "market_id": condition_id,
                 "espn_game_id": match.get("espn_game_id", ""),
                 "sport": match.get("sport", ""),
                 "game_date": match.get("game_date", ""),
@@ -237,7 +258,7 @@ def ingest_polymarket_history() -> dict:
             upsert_polymarket_price_history(price_buf); price_buf = []
         if len(trade_buf) >= 5000:
             upsert_polymarket_trades(trade_buf); trade_buf = []
-        if (i + 1) % 100 == 0:
+        if (i + 1) % 50 == 0:
             print(f"[Polymarket] {i+1}/{len(all_markets)} markets processed")
             time.sleep(0.3)
 
