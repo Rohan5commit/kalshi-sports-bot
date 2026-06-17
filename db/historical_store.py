@@ -4,6 +4,7 @@ lineup stats, referee tendencies, pitcher-batter matchups, weather cache,
 Kalshi/Polymarket market data, and data validation audit log.
 """
 import os
+import threading
 from datetime import date, datetime
 from typing import Optional
 
@@ -22,6 +23,33 @@ def _sb() -> Client:
 
 def _clean(rows: list) -> list:
     return [{k: v for k, v in row.items() if v is not None} for row in rows]
+
+
+# ── espn_schedule in-memory cache (eliminates per-market Supabase round trips) ─
+
+_ESPN_SCHEDULE_CACHE: dict = {}  # (sport, game_date) -> [rows]
+_ESPN_CACHE_LOCK = threading.Lock()
+_ESPN_CACHE_LOADED = False
+
+
+def _ensure_espn_cache():
+    global _ESPN_SCHEDULE_CACHE, _ESPN_CACHE_LOADED
+    if _ESPN_CACHE_LOADED:
+        return
+    with _ESPN_CACHE_LOCK:
+        if _ESPN_CACHE_LOADED:  # double-check after lock
+            return
+        print("[Cache] Loading espn_schedule into memory...")
+        rows = (_sb().table("espn_schedule")
+                .select("game_id,sport,game_date,home_team,away_team")
+                .execute().data)
+        cache: dict = {}
+        for row in rows:
+            key = (row.get("sport", ""), row.get("game_date", ""))
+            cache.setdefault(key, []).append(row)
+        _ESPN_SCHEDULE_CACHE = cache
+        _ESPN_CACHE_LOADED = True
+        print(f"[Cache] {len(rows)} espn_schedule rows loaded into {len(cache)} date-buckets")
 
 
 # ── Game logs ──────────────────────────────────────────────────────────────────
@@ -68,19 +96,16 @@ def find_game_by_teams_and_date(sport: str, team1: str, team2: str,
     """Find a game record matching two teams on a specific date (fuzzy team name match)."""
     from rapidfuzz import fuzz
     try:
-        table = _GAME_TABLES.get(sport)
-        if not table:
-            return None
-        rows = (_sb().table(table)
-                .select("game_id,game_date,home_team,away_team")
-                .eq("game_date", game_date).execute().data)
+        _ensure_espn_cache()
+        # In-memory lookup — no Supabase round trip on hot path
+        rows = _ESPN_SCHEDULE_CACHE.get((sport, game_date), [])
         if not rows:
-            # Fall back to pre-populated espn_schedule table.
-            # Live ESPN API is blocked from Modal's AWS containers, so we
-            # maintain this table via a local backfill script instead.
-            rows = (_sb().table("espn_schedule")
-                    .select("game_id,game_date,home_team,away_team")
-                    .eq("sport", sport).eq("game_date", game_date).execute().data)
+            # Cache miss: date outside backfill range — fall back to live sport table
+            table = _GAME_TABLES.get(sport)
+            if table:
+                rows = (_sb().table(table)
+                        .select("game_id,game_date,home_team,away_team")
+                        .eq("game_date", game_date).execute().data)
         best, best_score = None, 0.0
         for row in rows:
             home = row.get("home_team", "")
@@ -157,7 +182,7 @@ def upsert_referee_tendencies(records: list):
         try:
             sb.table("referee_tendencies").upsert(chunk, on_conflict="id").execute()
         except Exception as exc:
-            print(f"upsert_referee_tendencies error: {exc}")
+            print(f"upsert_referee_tendencies error chunk {i}: {exc}")
 
 
 def get_referee_tendency(sport: str, referee: str) -> dict:
@@ -371,4 +396,3 @@ def log_dropped_rows(records: list):
             sb.table("dropped_rows").insert(chunk).execute()
         except Exception as exc:
             print(f"log_dropped_rows error chunk {i}: {exc}")
-
