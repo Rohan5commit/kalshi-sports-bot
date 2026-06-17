@@ -130,10 +130,10 @@ _ALL_ALIASES = list(_ALIAS_MAP.keys())
 def _parse_ts(ts: str) -> Optional[datetime]:
     if not ts:
         return None
-    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%d"):
+    ts19 = str(ts)[:19]
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
-            dt = datetime.strptime(str(ts)[:19], fmt[:19])
-            return dt.replace(tzinfo=timezone.utc)
+            return datetime.strptime(ts19, fmt).replace(tzinfo=timezone.utc)
         except ValueError:
             continue
     return None
