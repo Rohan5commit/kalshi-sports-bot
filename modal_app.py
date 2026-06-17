@@ -137,7 +137,18 @@ def _load_nba_data(incremental_from=None) -> list:
     except Exception as exc:
         print(f"[NBA] Kaggle wyattowalsh error: {exc}")
 
-    print("[NBA] nba_api skipped (cloud IP block) — training on Kaggle game logs")
+    try:
+        print("[NBA] nba_data (stats.nba.com via nba_api)...")
+        from data.scrapers.nba_data import ingest_full_history as nba_data_ingest
+        from config import NBA_SEASONS
+        nba_logs = nba_data_ingest(NBA_SEASONS, incremental_from=incremental_from)
+        if nba_logs:
+            upsert_game_logs("NBA", nba_logs)
+            all_logs.extend(nba_logs)
+            print(f"[NBA] nba_data: {len(nba_logs)} enriched games stored")
+    except Exception as exc:
+        print(f"[NBA] nba_data error: {exc}\n{traceback.format_exc()}")
+
     print(f"[NBA] Total unique game records: {len(all_logs)}")
     return all_logs
 
