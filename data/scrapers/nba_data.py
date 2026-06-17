@@ -32,14 +32,27 @@ def _game_id(game_date: str, home: str, away: str) -> str:
     return "br_" + hashlib.md5(key.encode()).hexdigest()[:12]
 
 
-def _get_season(season_end_year: int) -> list:
-    try:
-        from basketball_reference_web_scraper import client
-        time.sleep(1.0)
-        return client.season_schedule(season_end_year=season_end_year)
-    except Exception as exc:
-        print(f"[NBA] BR {season_end_year}: {exc}")
-        return []
+def _get_season(season_end_year: int, retries: int = 2, backoff: int = 60) -> list:
+    """Fetch season schedule from basketball-reference with retry on 429."""
+    from basketball_reference_web_scraper import client
+    for attempt in range(retries):
+        try:
+            time.sleep(3.0)
+            return client.season_schedule(season_end_year=season_end_year)
+        except Exception as exc:
+            msg = str(exc)
+            if "429" in msg or "Too Many Requests" in msg:
+                if attempt < retries - 1:
+                    print(f"[NBA] BR {season_end_year}: rate limited, sleeping {backoff}s before retry...")
+                    time.sleep(backoff)
+                    backoff *= 2
+                else:
+                    print(f"[NBA] BR {season_end_year}: rate limited after {retries} attempts, skipping")
+                    return []
+            else:
+                print(f"[NBA] BR {season_end_year}: {exc}")
+                return []
+    return []
 
 
 def _games_to_records(games: list) -> list:
@@ -84,5 +97,5 @@ def ingest_full_history(seasons: list, incremental_from=None) -> list:
             records = [g for g in records if g.get("game_date", "") > str(incremental_from)]
         all_logs.extend(records)
         print(f"[NBA] BR {season} ({season}-{str(season_end_year)[-2:]}): {len(records)} games")
-        time.sleep(0.5)
+        time.sleep(5.0)  # extra cooldown between seasons to avoid BR rate limiting
     return all_logs
