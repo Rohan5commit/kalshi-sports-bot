@@ -251,7 +251,6 @@ def ingest_kalshi_history() -> dict:
         return {"markets": 0, "price_records": 0, "trades": 0, "matches": 0}
 
     price_buf, trade_buf, match_records = [], [], []
-    _kh_pre = 0
     total_prices, total_trades = 0, 0
 
     for i, market in enumerate(all_markets):
@@ -268,15 +267,8 @@ def ingest_kalshi_history() -> dict:
                 print(f"[Kalshi] scanned {i+1}/{len(all_markets)} markets...")
             continue
 
-        _kh_pre += 1
-        if _kh_pre <= 3 or "GAME" in ticker.upper():
-            from data.game_matcher import extract_teams_from_title
-            _teams_dbg = extract_teams_from_title(title)
-            print(f"[Kalshi][DBG#{_kh_pre}] ticker={ticker} title={title!r} teams={_teams_dbg}")
         match = match_market_to_game(title=title, close_time=close_time,
                                      market_id=ticker, source="kalshi")
-        if _kh_pre <= 3 or "GAME" in ticker.upper():
-            print(f"[Kalshi][DBG#{_kh_pre}] match={match}")
         if not match:
             continue
 
