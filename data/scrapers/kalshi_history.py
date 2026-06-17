@@ -320,6 +320,11 @@ def ingest_kalshi_history() -> dict:
         print("[Kalshi] No markets found — Kalshi demo API may not have settled sports data")
         return {"markets": 0, "price_records": 0, "trades": 0, "matches": 0}
 
+    # Pre-warm game lookup cache in main thread — prevents 20 threads from
+    # hammering Supabase simultaneously on first call
+    from db.historical_store import ensure_espn_cache
+    ensure_espn_cache()
+
     price_buf, trade_buf, match_records = [], [], []
     total_prices, total_trades, total_matches, processed = 0, 0, 0, 0
 
