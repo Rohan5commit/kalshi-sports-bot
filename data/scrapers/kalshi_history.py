@@ -28,7 +28,7 @@ _PROP_SUFFIX_RE = re.compile(r"LEADER|MENTION|HIT$|3D$|3PT$", re.I)
 
 
 def _make_auth_headers(method: str, path: str) -> dict:
-    """RSA-sign a Kalshi production API request."""
+    """RSA-PSS sign a Kalshi production API request (PSS+SHA256, path-only signing)."""
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import padding
     from cryptography.hazmat.backends import default_backend
@@ -36,31 +36,28 @@ def _make_auth_headers(method: str, path: str) -> dict:
     key_id = os.environ.get("KALSHI_API_KEY_ID", "")
     pem = os.environ.get("KALSHI_PRIVATE_KEY", "")
     if not key_id or not pem:
-        print("[Kalshi] Auth: missing key_id or pem")
         return {"Content-Type": "application/json"}
 
-    # Normalize escaped newlines from Modal secrets storage
+    # Normalize escaped newlines stored by Modal secrets
     if "\\n" in pem:
         pem = pem.replace("\\n", "\n")
 
-    # Diagnostic: log key ID prefix and PEM header (never log full key)
-    pem_header = pem[:40].replace("\n", "|")
-    print(f"[Kalshi] Auth: key_id={key_id[:8]}, pem_start={pem_header}")
-
     ts = str(int(time.time() * 1000))
-    msg_str = ts + method.upper() + API_PREFIX + path
-    print(f"[Kalshi] Auth: signing msg={msg_str[:60]}")
-    msg = msg_str.encode("utf-8")
+    # Kalshi signs: timestamp + method + path (no /trade-api/v2 prefix)
+    msg = (ts + method.upper() + path).encode("utf-8")
     try:
         private_key = serialization.load_pem_private_key(
             pem.encode(), password=None, backend=default_backend()
         )
-        print("[Kalshi] Auth: key loaded OK")
     except Exception as exc:
         print(f"[Kalshi] RSA key load error: {exc}")
         return {"Content-Type": "application/json"}
-    sig = private_key.sign(msg, padding.PKCS1v15(), hashes.SHA256())
-    print(f"[Kalshi] Auth: sig_b64_prefix={base64.b64encode(sig).decode()[:20]}")
+    # Kalshi uses RSA-PSS with SHA-256 (not PKCS1v15)
+    sig = private_key.sign(
+        msg,
+        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
+        hashes.SHA256(),
+    )
     return {
         "KALSHI-ACCESS-KEY": key_id,
         "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
