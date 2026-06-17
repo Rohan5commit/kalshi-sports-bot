@@ -38,11 +38,19 @@ def _make_auth_headers(method: str, path: str) -> dict:
     if not key_id or not pem:
         return {"Content-Type": "application/json"}
 
+    # Handle both escaped (\n) and literal newlines in PEM from Modal secrets
+    pem = pem.replace("\\n", "
+").replace("\n", "
+")
     ts = str(int(time.time() * 1000))
-    msg = (ts + method.upper() + path).encode("utf-8")  # Kalshi signs path-only (no version prefix)
-    private_key = serialization.load_pem_private_key(
-        pem.encode(), password=None, backend=default_backend()
-    )
+    msg = (ts + method.upper() + API_PREFIX + path).encode("utf-8")
+    try:
+        private_key = serialization.load_pem_private_key(
+            pem.encode(), password=None, backend=default_backend()
+        )
+    except Exception as exc:
+        print(f"[Kalshi] RSA key load error: {exc}")
+        return {"Content-Type": "application/json"}
     sig = private_key.sign(msg, padding.PKCS1v15(), hashes.SHA256())
     return {
         "KALSHI-ACCESS-KEY": key_id,
@@ -407,3 +415,4 @@ def ingest_kalshi_history() -> dict:
           f"{total_trades} trades, {total_matches} game matches")
     return {"markets": len(all_markets), "price_records": total_prices,
             "trades": total_trades, "matches": total_matches}
+
