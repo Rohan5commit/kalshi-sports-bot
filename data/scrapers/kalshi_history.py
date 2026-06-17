@@ -39,7 +39,7 @@ def _make_auth_headers(method: str, path: str) -> dict:
         return {"Content-Type": "application/json"}
 
     ts = str(int(time.time() * 1000))
-    msg = (ts + method.upper() + API_PREFIX + path).encode("utf-8")
+    msg = (ts + method.upper() + path).encode("utf-8")  # Kalshi signs path-only (no version prefix)
     private_key = serialization.load_pem_private_key(
         pem.encode(), password=None, backend=default_backend()
     )
