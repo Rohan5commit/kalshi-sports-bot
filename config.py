@@ -39,7 +39,7 @@ SMTP_DEFAULT_PORT = 587
 # Kalshi
 KALSHI_DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2"
 KALSHI_PROD_BASE = "https://api.kalshi.co/trade-api/v2"
-KALSHI_USE_DEMO = True
+KALSHI_USE_DEMO = False
 
 # ESPN
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
