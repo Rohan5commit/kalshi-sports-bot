@@ -36,22 +36,31 @@ def _make_auth_headers(method: str, path: str) -> dict:
     key_id = os.environ.get("KALSHI_API_KEY_ID", "")
     pem = os.environ.get("KALSHI_PRIVATE_KEY", "")
     if not key_id or not pem:
+        print("[Kalshi] Auth: missing key_id or pem")
         return {"Content-Type": "application/json"}
 
-    # Modal secrets may store newlines as literal \n — normalize to actual newlines
+    # Normalize escaped newlines from Modal secrets storage
     if "\\n" in pem:
         pem = pem.replace("\\n", "\n")
 
+    # Diagnostic: log key ID prefix and PEM header (never log full key)
+    pem_header = pem[:40].replace("\n", "|")
+    print(f"[Kalshi] Auth: key_id={key_id[:8]}, pem_start={pem_header}")
+
     ts = str(int(time.time() * 1000))
-    msg = (ts + method.upper() + API_PREFIX + path).encode("utf-8")
+    msg_str = ts + method.upper() + API_PREFIX + path
+    print(f"[Kalshi] Auth: signing msg={msg_str[:60]}")
+    msg = msg_str.encode("utf-8")
     try:
         private_key = serialization.load_pem_private_key(
             pem.encode(), password=None, backend=default_backend()
         )
+        print("[Kalshi] Auth: key loaded OK")
     except Exception as exc:
         print(f"[Kalshi] RSA key load error: {exc}")
         return {"Content-Type": "application/json"}
     sig = private_key.sign(msg, padding.PKCS1v15(), hashes.SHA256())
+    print(f"[Kalshi] Auth: sig_b64_prefix={base64.b64encode(sig).decode()[:20]}")
     return {
         "KALSHI-ACCESS-KEY": key_id,
         "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
