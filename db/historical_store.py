@@ -13,11 +13,15 @@ from supabase import create_client, Client
 _GAME_TABLES = {"NBA": "nba_game_logs", "NFL": "nfl_game_logs", "MLB": "mlb_game_logs"}
 
 _SB_CLIENT = None
+_SB_LOCK = threading.Lock()
 
 def _sb() -> Client:
     global _SB_CLIENT
-    if _SB_CLIENT is None:
-        _SB_CLIENT = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
+    if _SB_CLIENT is not None:
+        return _SB_CLIENT
+    with _SB_LOCK:
+        if _SB_CLIENT is None:
+            _SB_CLIENT = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
     return _SB_CLIENT
 
 
@@ -25,31 +29,46 @@ def _clean(rows: list) -> list:
     return [{k: v for k, v in row.items() if v is not None} for row in rows]
 
 
-# ── espn_schedule in-memory cache (eliminates per-market Supabase round trips) ─
+# ── espn_schedule in-memory cache ─────────────────────────────────────────────
 
-_ESPN_SCHEDULE_CACHE: dict = {}  # (sport, game_date) -> [rows]
+_ESPN_SCHEDULE_CACHE: dict = {}
 _ESPN_CACHE_LOCK = threading.Lock()
 _ESPN_CACHE_LOADED = False
 
 
-def _ensure_espn_cache():
+def ensure_espn_cache():
+    """Pre-load espn_schedule into memory. Call once in main thread before workers start."""
     global _ESPN_SCHEDULE_CACHE, _ESPN_CACHE_LOADED
     if _ESPN_CACHE_LOADED:
         return
     with _ESPN_CACHE_LOCK:
-        if _ESPN_CACHE_LOADED:  # double-check after lock
+        if _ESPN_CACHE_LOADED:
             return
-        print("[Cache] Loading espn_schedule into memory...")
-        rows = (_sb().table("espn_schedule")
-                .select("game_id,sport,game_date,home_team,away_team")
-                .execute().data)
+        print("[Cache] Loading espn_schedule into memory (paginated)...")
         cache: dict = {}
-        for row in rows:
-            key = (row.get("sport", ""), row.get("game_date", ""))
-            cache.setdefault(key, []).append(row)
-        _ESPN_SCHEDULE_CACHE = cache
-        _ESPN_CACHE_LOADED = True
-        print(f"[Cache] {len(rows)} espn_schedule rows loaded into {len(cache)} date-buckets")
+        total = 0
+        try:
+            offset, page_size = 0, 1000
+            while True:
+                rows = (_sb().table("espn_schedule")
+                        .select("game_id,sport,game_date,home_team,away_team")
+                        .range(offset, offset + page_size - 1)
+                        .execute().data)
+                if not rows:
+                    break
+                for row in rows:
+                    key = (row.get("sport", ""), row.get("game_date", ""))
+                    cache.setdefault(key, []).append(row)
+                total += len(rows)
+                if len(rows) < page_size:
+                    break
+                offset += page_size
+            print(f"[Cache] {total} rows loaded, {len(cache)} date-buckets")
+        except Exception as exc:
+            print(f"[Cache] WARNING: load failed ({exc}) — using live queries as fallback")
+        finally:
+            _ESPN_SCHEDULE_CACHE = cache
+            _ESPN_CACHE_LOADED = True  # always mark done to stop retry storm
 
 
 # ── Game logs ──────────────────────────────────────────────────────────────────
@@ -96,16 +115,25 @@ def find_game_by_teams_and_date(sport: str, team1: str, team2: str,
     """Find a game record matching two teams on a specific date (fuzzy team name match)."""
     from rapidfuzz import fuzz
     try:
-        _ensure_espn_cache()
-        # In-memory lookup — no Supabase round trip on hot path
+        # In-memory lookup — fast path (no Supabase round trip)
         rows = _ESPN_SCHEDULE_CACHE.get((sport, game_date), [])
         if not rows:
-            # Cache miss: date outside backfill range — fall back to live sport table
+            # Cache miss or failed load — live fallback
             table = _GAME_TABLES.get(sport)
             if table:
-                rows = (_sb().table(table)
-                        .select("game_id,game_date,home_team,away_team")
-                        .eq("game_date", game_date).execute().data)
+                try:
+                    rows = (_sb().table(table)
+                            .select("game_id,game_date,home_team,away_team")
+                            .eq("game_date", game_date).execute().data)
+                except Exception:
+                    pass
+            if not rows:
+                try:
+                    rows = (_sb().table("espn_schedule")
+                            .select("game_id,game_date,home_team,away_team")
+                            .eq("sport", sport).eq("game_date", game_date).execute().data)
+                except Exception:
+                    pass
         best, best_score = None, 0.0
         for row in rows:
             home = row.get("home_team", "")
