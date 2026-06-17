@@ -432,7 +432,7 @@ def _run_sport_pipeline(sport: str):
 
 @app.function(
     image=image, secrets=secrets,
-    timeout=10800, cpu=4, memory=8192,
+    timeout=21600, cpu=8, memory=16384,
 )
 def _run_market_pipeline():
     """Ingest Kalshi + Polymarket historical data and match to game records."""
