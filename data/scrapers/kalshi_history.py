@@ -38,10 +38,10 @@ def _make_auth_headers(method: str, path: str) -> dict:
     if not key_id or not pem:
         return {"Content-Type": "application/json"}
 
-    # Handle both escaped (\n) and literal newlines in PEM from Modal secrets
-    pem = pem.replace("\\n", "
-").replace("\n", "
-")
+    # Modal secrets may store newlines as literal \n — normalize to actual newlines
+    if "\\n" in pem:
+        pem = pem.replace("\\n", "\n")
+
     ts = str(int(time.time() * 1000))
     msg = (ts + method.upper() + API_PREFIX + path).encode("utf-8")
     try:
@@ -253,7 +253,7 @@ def compute_market_features(history: list, game_start_time: str) -> dict:
 
 
 def _process_single_market(market: dict):
-    """Thread worker: pre-filter → match → price history + trades → compute features."""
+    """Thread worker: pre-filter -> match -> price history + trades -> compute features."""
     from data.game_matcher import match_market_to_game
 
     ticker = market.get("ticker", "")
@@ -273,7 +273,6 @@ def _process_single_market(market: dict):
 
     game_start_time = match.get("game_start_time", close_time)
 
-    # Fetch price history and trades from production API
     history = get_market_price_history(ticker)
     feats = compute_market_features(history, game_start_time) if history else {}
 
@@ -415,4 +414,3 @@ def ingest_kalshi_history() -> dict:
           f"{total_trades} trades, {total_matches} game matches")
     return {"markets": len(all_markets), "price_records": total_prices,
             "trades": total_trades, "matches": total_matches}
-
