@@ -38,8 +38,13 @@ def _espn_fallback_games(sport: str, game_date: str) -> list:
         return []
 
 
+_SB_CLIENT = None
+
 def _sb() -> Client:
-    return create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
+    global _SB_CLIENT
+    if _SB_CLIENT is None:
+        _SB_CLIENT = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
+    return _SB_CLIENT
 
 
 def _clean(rows: list) -> list:
@@ -96,11 +101,8 @@ def find_game_by_teams_and_date(sport: str, team1: str, team2: str,
         rows = (_sb().table(table)
                 .select("game_id,game_date,home_team,away_team")
                 .eq("game_date", game_date).execute().data)
-        print(f"[DEBUG DB] sport={sport} date={game_date} rows={len(rows)}")
         if not rows:
-            print(f"[DEBUG ESPN] calling fallback for {sport} {game_date}")
             rows = _espn_fallback_games(sport, game_date)
-            print(f"[DEBUG ESPN] got {len(rows)} rows")
         best, best_score = None, 0.0
         for row in rows:
             home = row.get("home_team", "")
