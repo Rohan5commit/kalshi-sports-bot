@@ -147,9 +147,10 @@ def get_market_trades(ticker: str) -> list:
 def _parse_ts(ts: str) -> Optional[datetime]:
     if not ts:
         return None
-    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S.%fZ"):
+    ts19 = str(ts)[:19]
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
-            return datetime.strptime(str(ts)[:19], fmt[:19]).replace(tzinfo=timezone.utc)
+            return datetime.strptime(ts19, fmt).replace(tzinfo=timezone.utc)
         except ValueError:
             continue
     return None
