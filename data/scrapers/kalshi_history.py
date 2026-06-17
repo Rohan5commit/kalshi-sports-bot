@@ -1,33 +1,63 @@
 """
 data/scrapers/kalshi_history.py — Pull historical Kalshi sports markets.
-Public API endpoints — zero authentication required.
-Uses GET /markets with series_ticker filter (demo + production compatible).
+Production API with RSA authentication (KALSHI-ACCESS-KEY / KALSHI-ACCESS-SIGNATURE).
+Fetches series, markets, price history, and trades for NBA/NFL/MLB games.
 """
+import base64
+import os
 import re
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import requests
 
-BASE = "https://demo-api.kalshi.co/trade-api/v2"
-PROD_BASE = "https://trading-api.kalshi.com/trade-api/v2"
+API_HOST = "https://api.kalshi.co"
+API_PREFIX = "/trade-api/v2"
+PROD_BASE = API_HOST + API_PREFIX
 
 SPORTS_SERIES_PREFIXES = [
     "NBA", "NFL", "MLB", "NHL", "NCAA", "WNBA", "MLS",
     "EPL", "UFC", "BOXING", "TENNIS", "GOLF", "SOCCER",
 ]
 
-# Only process our 3 target sports; skip player-prop series (e.g. KXMLBHIT = 47k markets)
 _TARGET_SPORT_RE = re.compile(r"^KX(NBA|NFL|MLB)", re.I)
 _PROP_SUFFIX_RE = re.compile(r"LEADER|MENTION|HIT$|3D$|3PT$", re.I)
 
 
-def _get(path: str, params: dict = None, retries: int = 3, base: str = BASE) -> dict:
+def _make_auth_headers(method: str, path: str) -> dict:
+    """RSA-sign a Kalshi production API request."""
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.backends import default_backend
+
+    key_id = os.environ.get("KALSHI_API_KEY_ID", "")
+    pem = os.environ.get("KALSHI_PRIVATE_KEY", "")
+    if not key_id or not pem:
+        return {"Content-Type": "application/json"}
+
+    ts = str(int(time.time() * 1000))
+    msg = (ts + method.upper() + API_PREFIX + path).encode("utf-8")
+    private_key = serialization.load_pem_private_key(
+        pem.encode(), password=None, backend=default_backend()
+    )
+    sig = private_key.sign(msg, padding.PKCS1v15(), hashes.SHA256())
+    return {
+        "KALSHI-ACCESS-KEY": key_id,
+        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
+        "KALSHI-ACCESS-TIMESTAMP": ts,
+        "Content-Type": "application/json",
+    }
+
+
+def _get(path: str, params: dict = None, retries: int = 3) -> dict:
+    params = params or {}
     for attempt in range(retries):
         try:
-            r = requests.get(f"{base}{path}", params=params or {}, timeout=30)
+            headers = _make_auth_headers("GET", path)
+            r = requests.get(f"{PROD_BASE}{path}", params=params, headers=headers, timeout=30)
             if r.status_code == 429:
                 time.sleep(5 * (attempt + 1))
                 continue
@@ -56,10 +86,7 @@ def get_all_series() -> list:
 
 
 def get_markets_for_series(series_ticker: str) -> list:
-    """
-    Get all settled markets for a series using GET /markets?series_ticker=.
-    Falls back to trying without status filter if needed.
-    """
+    """Get all settled markets for a series using GET /markets?series_ticker=."""
     markets, cursor = [], None
     while True:
         params = {"limit": 200, "series_ticker": series_ticker, "status": "settled"}
@@ -87,10 +114,7 @@ def get_markets_for_series(series_ticker: str) -> list:
 
 
 def get_all_sports_markets_paginated() -> list:
-    """
-    Fall-through: GET /markets with pagination, filter by title for sports.
-    Used when series-level filtering yields nothing.
-    """
+    """Fall-through: GET /markets with pagination, filter by title for sports."""
     markets, cursor, page = [], None, 0
     sports_kw = ["nba", "nfl", "mlb", "nhl", "ncaa", "mls", "ufc", "playoffs",
                  "championship", "super bowl", "world series"]
@@ -122,16 +146,16 @@ def get_all_sports_markets_paginated() -> list:
 
 def get_market_price_history(ticker: str) -> list:
     try:
-        data = _get(f"/markets/{ticker}/history")
+        data = _get(f"/markets/{ticker}/history", {"limit": 1000})
         return data.get("history", [])
     except Exception as exc:
         print(f"[Kalshi] price_history {ticker}: {exc}")
         return []
 
 
-def get_market_trades(ticker: str) -> list:
-    trades, cursor = [], None
-    while True:
+def get_market_trades(ticker: str, max_pages: int = 20) -> list:
+    trades, cursor, page = [], None, 0
+    while page < max_pages:
         params = {"limit": 1000}
         if cursor:
             params["cursor"] = cursor
@@ -142,18 +166,21 @@ def get_market_trades(ticker: str) -> list:
         batch = data.get("trades", [])
         trades.extend(batch)
         cursor = data.get("cursor")
+        page += 1
         if not cursor or not batch:
             break
     return trades
 
 
-def _parse_ts(ts: str) -> Optional[datetime]:
-    if not ts:
+def _parse_ts(ts) -> Optional[datetime]:
+    if ts is None:
         return None
-    ts19 = str(ts)[:19]
+    if isinstance(ts, (int, float)):
+        return datetime.fromtimestamp(float(ts), tz=timezone.utc)
+    ts_str = str(ts)[:19]
     for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
-            return datetime.strptime(ts19, fmt).replace(tzinfo=timezone.utc)
+            return datetime.strptime(ts_str, fmt).replace(tzinfo=timezone.utc)
         except ValueError:
             continue
     return None
@@ -218,7 +245,7 @@ def compute_market_features(history: list, game_start_time: str) -> dict:
 
 
 def _process_single_market(market: dict):
-    """Thread worker: pre-filter → match. Price history skipped (demo API returns 404)."""
+    """Thread worker: pre-filter → match → price history + trades → compute features."""
     from data.game_matcher import match_market_to_game
 
     ticker = market.get("ticker", "")
@@ -237,6 +264,47 @@ def _process_single_market(market: dict):
         return None
 
     game_start_time = match.get("game_start_time", close_time)
+
+    # Fetch price history and trades from production API
+    history = get_market_price_history(ticker)
+    feats = compute_market_features(history, game_start_time) if history else {}
+
+    price_recs = []
+    for h in history:
+        ts_val = h.get("ts") or h.get("timestamp")
+        if ts_val is None:
+            continue
+        ts_dt = _parse_ts(ts_val)
+        yes_p = _norm_price(h.get("yes_price"))
+        no_p = _norm_price(h.get("no_price"))
+        price_recs.append({
+            "id": str(uuid.uuid4()),
+            "ticker": ticker,
+            "timestamp": ts_dt.isoformat() if ts_dt else None,
+            "yes_price": yes_p,
+            "no_price": no_p,
+            "volume": int(h.get("volume") or 0),
+            "game_id": match.get("espn_game_id", ""),
+        })
+
+    trades_raw = get_market_trades(ticker)
+    trade_recs = []
+    for t in trades_raw:
+        trade_id = t.get("trade_id") or t.get("id", "")
+        if not trade_id:
+            continue
+        ts_val = t.get("created_time") or t.get("timestamp", "")
+        ts_dt = _parse_ts(ts_val)
+        yes_p = t.get("yes_price", 50)
+        trade_recs.append({
+            "id": str(trade_id),
+            "ticker": ticker,
+            "timestamp": ts_dt.isoformat() if ts_dt else None,
+            "price": _norm_price(yes_p),
+            "count": int(t.get("count") or 0),
+            "taker_side": t.get("taker_side", ""),
+        })
+
     match_rec = {
         "kalshi_ticker": ticker,
         "espn_game_id": match.get("espn_game_id", ""),
@@ -246,8 +314,9 @@ def _process_single_market(market: dict):
         "away_team": match.get("away_team", ""),
         "game_start_time": game_start_time,
         "match_confidence_score": match.get("match_confidence_score", 0.0),
+        **feats,
     }
-    return (match_rec, [], [])
+    return (match_rec, price_recs, trade_recs)
 
 
 def ingest_kalshi_history() -> dict:
@@ -257,7 +326,6 @@ def ingest_kalshi_history() -> dict:
     print("[Kalshi] Fetching sports series...")
     all_series = get_all_series()
 
-    # Only NBA/NFL/MLB; skip player-prop series (KXMLBHIT alone = 47k markets)
     game_series = [
         s for s in all_series
         if _TARGET_SPORT_RE.match(s.get("ticker", ""))
@@ -288,19 +356,16 @@ def ingest_kalshi_history() -> dict:
 
     print(f"[Kalshi] Total game-level markets to process: {len(all_markets)}")
     if not all_markets:
-        print("[Kalshi] No markets found — Kalshi demo API may not have settled sports data")
+        print("[Kalshi] No markets found")
         return {"markets": 0, "price_records": 0, "trades": 0, "matches": 0}
 
-    # Pre-warm game lookup cache in main thread — prevents 20 threads from
-    # hammering Supabase simultaneously on first call
     from db.historical_store import ensure_espn_cache
     ensure_espn_cache()
 
     price_buf, trade_buf, match_records = [], [], []
     total_prices, total_trades, total_matches, processed = 0, 0, 0, 0
 
-    # 20-thread parallel I/O — ~15x speedup vs sequential
-    with ThreadPoolExecutor(max_workers=20) as pool:
+    with ThreadPoolExecutor(max_workers=12) as pool:
         futures = {pool.submit(_process_single_market, m): m for m in all_markets}
         for fut in as_completed(futures):
             processed += 1
@@ -328,7 +393,7 @@ def ingest_kalshi_history() -> dict:
                 print(f"[Kalshi] Flushed {total_matches} matches to DB ({processed}/{len(all_markets)} processed)")
                 match_records = []
 
-            if processed % 1000 == 0:
+            if processed % 500 == 0:
                 print(f"[Kalshi] {processed}/{len(all_markets)} markets processed, "
                       f"{total_matches + len(match_records)} matches, {total_prices} price ticks")
 
