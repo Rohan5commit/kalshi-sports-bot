@@ -63,8 +63,8 @@ OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
 # Historical data — full history ranges for initial load
-# NBA: 1996-97 season through 2024-25
-NBA_SEASONS = list(range(1996, 2025))
+# NBA: 2022-23 season through 2025-26 (recent seasons for Kalshi overlap)
+NBA_SEASONS = list(range(2022, 2026))
 # NFL: 1999 season through 2024
 NFL_SEASONS = list(range(1999, 2026))
 # MLB: 2019 through 2023 (5 seasons of Statcast — 9 seasons took ~5h, over budget)
