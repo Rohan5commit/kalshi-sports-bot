@@ -218,7 +218,7 @@ def compute_market_features(history: list, game_start_time: str) -> dict:
 
 
 def _process_single_market(market: dict):
-    """Thread worker: pre-filter → match → fetch history/trades. Returns tuple or None."""
+    """Thread worker: pre-filter → match. Price history skipped (demo API returns 404)."""
     from data.game_matcher import match_market_to_game
 
     ticker = market.get("ticker", "")
@@ -237,34 +237,6 @@ def _process_single_market(market: dict):
         return None
 
     game_start_time = match.get("game_start_time", close_time)
-    history = get_market_price_history(ticker)
-    feats = compute_market_features(history, game_start_time) if history else {}
-
-    price_recs = []
-    for h in history:
-        ts = h.get("ts") or h.get("timestamp", "")
-        price_recs.append({
-            "ticker": ticker,
-            "timestamp": ts,
-            "yes_price": _norm_price(h.get("yes_price")),
-            "no_price": _norm_price(h.get("no_price")),
-            "volume": int(h.get("volume") or 0),
-            "game_id": ticker,
-        })
-
-    trades = get_market_trades(ticker)
-    trade_recs = []
-    for t in trades:
-        trade_id = t.get("trade_id") or f"{ticker}_{t.get('created_time', '')}"
-        trade_recs.append({
-            "id": trade_id,
-            "ticker": ticker,
-            "timestamp": t.get("created_time", ""),
-            "price": _norm_price(t.get("yes_price")),
-            "count": int(t.get("count") or 0),
-            "taker_side": t.get("taker_side", ""),
-        })
-
     match_rec = {
         "kalshi_ticker": ticker,
         "espn_game_id": match.get("espn_game_id", ""),
@@ -274,9 +246,8 @@ def _process_single_market(market: dict):
         "away_team": match.get("away_team", ""),
         "game_start_time": game_start_time,
         "match_confidence_score": match.get("match_confidence_score", 0.0),
-        **feats,
     }
-    return (match_rec, price_recs, trade_recs)
+    return (match_rec, [], [])
 
 
 def ingest_kalshi_history() -> dict:
