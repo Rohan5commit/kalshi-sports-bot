@@ -11,33 +11,6 @@ from supabase import create_client, Client
 
 _GAME_TABLES = {"NBA": "nba_game_logs", "NFL": "nfl_game_logs", "MLB": "mlb_game_logs"}
 
-_ESPN_CACHE: dict = {}
-
-
-def _espn_fallback_games(sport: str, game_date: str) -> list:
-    """Fetch games from ESPN for a date not yet in the DB (e.g. current season)."""
-    from data.scrapers.espn import get_scoreboard
-    from datetime import date as date_cls
-    key = (sport, game_date)
-    if key in _ESPN_CACHE:
-        return _ESPN_CACHE[key]
-    try:
-        dt = date_cls.fromisoformat(game_date)
-        games = get_scoreboard(sport, dt)
-        rows = [
-            {"game_id": g["id"], "game_date": game_date,
-             "home_team": g["home_team"], "away_team": g["away_team"],
-             "game_start_time": g.get("date", "")}
-            for g in games if g.get("id") and g.get("home_team") and g.get("away_team")
-        ]
-        _ESPN_CACHE[key] = rows
-        return rows
-    except Exception as exc:
-        print(f"ESPN fallback error {sport} {game_date}: {exc}")
-        _ESPN_CACHE[key] = []
-        return []
-
-
 _SB_CLIENT = None
 
 def _sb() -> Client:
@@ -102,7 +75,12 @@ def find_game_by_teams_and_date(sport: str, team1: str, team2: str,
                 .select("game_id,game_date,home_team,away_team")
                 .eq("game_date", game_date).execute().data)
         if not rows:
-            rows = _espn_fallback_games(sport, game_date)
+            # Fall back to pre-populated espn_schedule table.
+            # Live ESPN API is blocked from Modal's AWS containers, so we
+            # maintain this table via a local backfill script instead.
+            rows = (_sb().table("espn_schedule")
+                    .select("game_id,game_date,home_team,away_team")
+                    .eq("sport", sport).eq("game_date", game_date).execute().data)
         best, best_score = None, 0.0
         for row in rows:
             home = row.get("home_team", "")
