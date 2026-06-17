@@ -3,6 +3,7 @@ data/scrapers/kalshi_history.py — Pull historical Kalshi sports markets.
 Public API endpoints — zero authentication required.
 Uses GET /markets with series_ticker filter (demo + production compatible).
 """
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -17,6 +18,10 @@ SPORTS_SERIES_PREFIXES = [
     "NBA", "NFL", "MLB", "NHL", "NCAA", "WNBA", "MLS",
     "EPL", "UFC", "BOXING", "TENNIS", "GOLF", "SOCCER",
 ]
+
+# Only process our 3 target sports; skip player-prop series (e.g. KXMLBHIT = 47k markets)
+_TARGET_SPORT_RE = re.compile(r"^KX(NBA|NFL|MLB)", re.I)
+_PROP_SUFFIX_RE = re.compile(r"LEADER|MENTION|HIT$|3D$|3PT$", re.I)
 
 
 def _get(path: str, params: dict = None, retries: int = 3, base: str = BASE) -> dict:
@@ -40,7 +45,6 @@ def get_all_series() -> list:
     try:
         data = _get("/series", {"limit": 200})
         all_series = data.get("series", [])
-        # Filter to sports-relevant series
         sports = [
             s for s in all_series
             if any(pfx in s.get("ticker", "").upper() for pfx in SPORTS_SERIES_PREFIXES)
@@ -68,7 +72,6 @@ def get_markets_for_series(series_ticker: str) -> list:
             break
         batch = data.get("markets", [])
         if not batch and not cursor:
-            # Try without status filter
             try:
                 data2 = _get("/markets", {"limit": 200, "series_ticker": series_ticker})
                 batch = data2.get("markets", [])
@@ -214,16 +217,83 @@ def compute_market_features(history: list, game_start_time: str) -> dict:
     }
 
 
-def ingest_kalshi_history() -> dict:
+def _process_single_market(market: dict):
+    """Thread worker: pre-filter → match → fetch history/trades. Returns tuple or None."""
     from data.game_matcher import match_market_to_game
+
+    ticker = market.get("ticker", "")
+    if not ticker:
+        return None
+    title = market.get("title") or market.get("subtitle", "")
+    close_time = market.get("close_time") or market.get("expiration_time", "")
+
+    title_lower = title.lower()
+    if " vs" not in title_lower and " @ " not in title_lower and " at " not in title_lower:
+        return None
+
+    match = match_market_to_game(title=title, close_time=close_time,
+                                  market_id=ticker, source="kalshi")
+    if not match:
+        return None
+
+    game_start_time = match.get("game_start_time", close_time)
+    history = get_market_price_history(ticker)
+    feats = compute_market_features(history, game_start_time) if history else {}
+
+    price_recs = []
+    for h in history:
+        ts = h.get("ts") or h.get("timestamp", "")
+        price_recs.append({
+            "ticker": ticker,
+            "timestamp": ts,
+            "yes_price": _norm_price(h.get("yes_price")),
+            "no_price": _norm_price(h.get("no_price")),
+            "volume": int(h.get("volume") or 0),
+            "game_id": ticker,
+        })
+
+    trades = get_market_trades(ticker)
+    trade_recs = []
+    for t in trades:
+        trade_id = t.get("trade_id") or f"{ticker}_{t.get('created_time', '')}"
+        trade_recs.append({
+            "id": trade_id,
+            "ticker": ticker,
+            "timestamp": t.get("created_time", ""),
+            "price": _norm_price(t.get("yes_price")),
+            "count": int(t.get("count") or 0),
+            "taker_side": t.get("taker_side", ""),
+        })
+
+    match_rec = {
+        "kalshi_ticker": ticker,
+        "espn_game_id": match.get("espn_game_id", ""),
+        "sport": match.get("sport", ""),
+        "game_date": match.get("game_date", ""),
+        "home_team": match.get("home_team", ""),
+        "away_team": match.get("away_team", ""),
+        "game_start_time": game_start_time,
+        "match_confidence_score": match.get("match_confidence_score", 0.0),
+        **feats,
+    }
+    return (match_rec, price_recs, trade_recs)
+
+
+def ingest_kalshi_history() -> dict:
     from db.historical_store import (upsert_kalshi_price_history, upsert_kalshi_trades,
                                      upsert_kalshi_game_matches)
 
     print("[Kalshi] Fetching sports series...")
-    sports_series = get_all_series()
-    print(f"[Kalshi] {len(sports_series)} sports series found")
+    all_series = get_all_series()
 
-    # Parallel series fetch — 8 threads reduces ~60min sequential to ~8min
+    # Only NBA/NFL/MLB; skip player-prop series (KXMLBHIT alone = 47k markets)
+    game_series = [
+        s for s in all_series
+        if _TARGET_SPORT_RE.match(s.get("ticker", ""))
+        and not _PROP_SUFFIX_RE.search(s.get("ticker", ""))
+    ]
+    print(f"[Kalshi] {len(all_series)} sports series -> {len(game_series)} after NBA/NFL/MLB + prop filter")
+
     all_markets = []
     completed = 0
 
@@ -231,102 +301,68 @@ def ingest_kalshi_history() -> dict:
         return ticker, get_markets_for_series(ticker)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = {pool.submit(_fetch, s.get("ticker", "")): s for s in sports_series}
+        futures = {pool.submit(_fetch, s.get("ticker", "")): s for s in game_series}
         for fut in as_completed(futures):
             ticker, mkts = fut.result()
             completed += 1
             if mkts:
                 print(f"[Kalshi] {ticker}: {len(mkts)} markets")
                 all_markets.extend(mkts)
-            if completed % 100 == 0:
-                print(f"[Kalshi] {completed}/{len(sports_series)} series fetched...")
+            if completed % 50 == 0:
+                print(f"[Kalshi] {completed}/{len(game_series)} series fetched...")
 
-    # If series approach yielded nothing, fall back to paginated scan
     if not all_markets:
         print("[Kalshi] Series approach yielded 0 markets, trying paginated scan...")
         all_markets = get_all_sports_markets_paginated()
 
-    print(f"[Kalshi] Total markets: {len(all_markets)}")
+    print(f"[Kalshi] Total game-level markets to process: {len(all_markets)}")
     if not all_markets:
         print("[Kalshi] No markets found — Kalshi demo API may not have settled sports data")
         return {"markets": 0, "price_records": 0, "trades": 0, "matches": 0}
 
     price_buf, trade_buf, match_records = [], [], []
-    total_prices, total_trades = 0, 0
+    total_prices, total_trades, total_matches, processed = 0, 0, 0, 0
 
-    for i, market in enumerate(all_markets):
-        ticker = market.get("ticker", "")
-        if not ticker:
-            continue
-        title = market.get("title") or market.get("subtitle", "")
-        close_time = market.get("close_time") or market.get("expiration_time", "")
+    # 20-thread parallel I/O — ~15x speedup vs sequential
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        futures = {pool.submit(_process_single_market, m): m for m in all_markets}
+        for fut in as_completed(futures):
+            processed += 1
+            try:
+                result = fut.result()
+            except Exception as exc:
+                print(f"[Kalshi] market error: {exc}")
+                continue
 
-        # Fast pre-filter: game markets always contain "vs", "at", or "@" in title
-        title_lower = title.lower()
-        if " vs" not in title_lower and " @ " not in title_lower and " at " not in title_lower:
-            if (i + 1) % 10000 == 0:
-                print(f"[Kalshi] scanned {i+1}/{len(all_markets)} markets...")
-            continue
+            if result:
+                match_rec, price_recs, trade_recs = result
+                match_records.append(match_rec)
+                price_buf.extend(price_recs)
+                trade_buf.extend(trade_recs)
+                total_prices += len(price_recs)
+                total_trades += len(trade_recs)
 
-        match = match_market_to_game(title=title, close_time=close_time,
-                                     market_id=ticker, source="kalshi")
-        if not match:
-            continue
+            if len(price_buf) >= 5000:
+                upsert_kalshi_price_history(price_buf); price_buf = []
+            if len(trade_buf) >= 5000:
+                upsert_kalshi_trades(trade_buf); trade_buf = []
+            if len(match_records) >= 200:
+                upsert_kalshi_game_matches(match_records)
+                total_matches += len(match_records)
+                print(f"[Kalshi] Flushed {total_matches} matches to DB ({processed}/{len(all_markets)} processed)")
+                match_records = []
 
-        game_start_time = match.get("game_start_time", close_time)
-
-        history = get_market_price_history(ticker)
-        feats = compute_market_features(history, game_start_time) if history else {}
-        total_prices += len(history)
-
-        for h in history:
-            ts = h.get("ts") or h.get("timestamp", "")
-            price_buf.append({
-                "ticker": ticker,
-                "timestamp": ts,
-                "yes_price": _norm_price(h.get("yes_price")),
-                "no_price": _norm_price(h.get("no_price")),
-                "volume": int(h.get("volume") or 0),
-                "game_id": ticker,
-            })
-
-        trades = get_market_trades(ticker)
-        total_trades += len(trades)
-        for t in trades:
-            trade_id = t.get("trade_id") or f"{ticker}_{t.get('created_time', i)}"
-            trade_buf.append({
-                "id": trade_id,
-                "ticker": ticker,
-                "timestamp": t.get("created_time", ""),
-                "price": _norm_price(t.get("yes_price")),
-                "count": int(t.get("count") or 0),
-                "taker_side": t.get("taker_side", ""),
-            })
-
-        match_records.append({
-            "kalshi_ticker": ticker,
-            "espn_game_id": match.get("espn_game_id", ""),
-            "sport": match.get("sport", ""),
-            "game_date": match.get("game_date", ""),
-            "home_team": match.get("home_team", ""),
-            "away_team": match.get("away_team", ""),
-            "game_start_time": game_start_time,
-            "match_confidence_score": match.get("match_confidence_score", 0.0),
-            **feats,
-        })
-
-        if len(price_buf) >= 5000:
-            upsert_kalshi_price_history(price_buf); price_buf = []
-        if len(trade_buf) >= 5000:
-            upsert_kalshi_trades(trade_buf); trade_buf = []
-        if (i + 1) % 100 == 0:
-            print(f"[Kalshi] {i+1}/{len(all_markets)} markets processed, {len(match_records)} matched")
+            if processed % 1000 == 0:
+                print(f"[Kalshi] {processed}/{len(all_markets)} markets processed, "
+                      f"{total_matches + len(match_records)} matches, {total_prices} price ticks")
 
     if price_buf: upsert_kalshi_price_history(price_buf)
     if trade_buf: upsert_kalshi_trades(trade_buf)
-    if match_records: upsert_kalshi_game_matches(match_records)
+    if match_records:
+        upsert_kalshi_game_matches(match_records)
+        total_matches += len(match_records)
 
     print(f"[Kalshi] Done: {len(all_markets)} markets scanned, {total_prices} price ticks, "
-          f"{total_trades} trades, {len(match_records)} game matches")
+          f"{total_trades} trades, {total_matches} game matches")
     return {"markets": len(all_markets), "price_records": total_prices,
-            "trades": total_trades, "matches": len(match_records)}
+            "trades": total_trades, "matches": total_matches}
