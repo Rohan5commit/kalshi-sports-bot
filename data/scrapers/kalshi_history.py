@@ -14,7 +14,7 @@ from typing import Optional
 
 import requests
 
-API_HOST = "https://api.kalshi.co"
+API_HOST = "https://trading-api.kalshi.com"
 API_PREFIX = "/trade-api/v2"
 PROD_BASE = API_HOST + API_PREFIX
 
