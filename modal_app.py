@@ -26,7 +26,7 @@ image = (
         "supabase>=2.0",
         "sportsreference>=0.5.0",
         "scipy>=1.12",
-        "nba_api>=1.4",
+        "basketball-reference-web-scraper>=0.8",
         "nfl_data_py>=0.3",
         "pybaseball>=2.2",
         "kaggle>=1.6",
@@ -138,7 +138,7 @@ def _load_nba_data(incremental_from=None) -> list:
         print(f"[NBA] Kaggle wyattowalsh error: {exc}")
 
     try:
-        print("[NBA] nba_data (stats.nba.com via nba_api)...")
+        print("[NBA] nba_data (basketball-reference.com)...")
         from data.scrapers.nba_data import ingest_full_history as nba_data_ingest
         from config import NBA_SEASONS
         nba_logs = nba_data_ingest(NBA_SEASONS, incremental_from=incremental_from)
