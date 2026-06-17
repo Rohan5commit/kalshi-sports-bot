@@ -36,7 +36,6 @@ def _get(base: str, path: str, params: dict = None, retries: int = 3) -> dict:
 
 def get_all_sports_markets() -> list:
     markets = []
-    # Gamma API: pull closed sports markets
     try:
         page, limit = 0, 500
         while True:
@@ -59,9 +58,6 @@ def get_all_sports_markets() -> list:
         print(f"[Polymarket] Gamma API: {len(markets)} sports markets found")
     except Exception as exc:
         print(f"[Polymarket] Gamma API error: {exc}")
-
-    # CLOB markets endpoint skipped — Gamma API covers all closed sports markets
-
     return markets
 
 
@@ -78,9 +74,9 @@ def get_market_price_history(market_id: str) -> list:
         return []
 
 
-def get_market_trades(market_id: str) -> list:
-    trades, cursor = [], None
-    while True:
+def get_market_trades(market_id: str, max_pages: int = 50) -> list:
+    trades, cursor, page = [], None, 0
+    while page < max_pages:
         params = {"market_id": market_id, "limit": 500}
         if cursor:
             params["next_cursor"] = cursor
@@ -91,6 +87,7 @@ def get_market_trades(market_id: str) -> list:
         batch = data.get("data", [])
         trades.extend(batch)
         cursor = data.get("next_cursor")
+        page += 1
         if not cursor or not batch:
             break
     return trades
@@ -113,7 +110,6 @@ def _norm_price(p) -> float:
     if p is None:
         return 0.5
     f = float(p)
-    # Polymarket CLOB prices are in [0, 1]
     return min(max(f, 0.0), 1.0)
 
 
@@ -199,10 +195,10 @@ def ingest_polymarket_history() -> dict:
             ts = h.get("t") or h.get("timestamp", "")
             p = _norm_price(h.get("p") or h.get("price"))
             vol = float(h.get("v") or h.get("volume") or 0)
+            ts_dt = _parse_ts(ts)
             price_buf.append({
                 "market_id": market_id,
-                "timestamp": ts if isinstance(ts, str) else datetime.fromtimestamp(
-                    float(ts), tz=timezone.utc).isoformat(),
+                "timestamp": ts_dt.isoformat() if ts_dt else None,
                 "yes_price": p,
                 "no_price": round(1.0 - p, 4),
                 "volume": vol,
@@ -214,12 +210,11 @@ def ingest_polymarket_history() -> dict:
         for t in trades:
             trade_id = t.get("id") or f"{market_id}_{t.get('timestamp', i)}"
             ts = t.get("timestamp") or ""
-            price_buf_ts = (datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
-                            if isinstance(ts, (int, float)) else ts)
+            ts_dt = _parse_ts(ts)
             trade_buf.append({
                 "id": str(trade_id),
                 "market_id": market_id,
-                "timestamp": price_buf_ts,
+                "timestamp": ts_dt.isoformat() if ts_dt else None,
                 "price": _norm_price(t.get("price")),
                 "size": float(t.get("size") or 0),
                 "side": t.get("side", ""),
