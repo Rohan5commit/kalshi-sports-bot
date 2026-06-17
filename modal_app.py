@@ -525,6 +525,25 @@ def run_market_retrain():
     print("\n=== run_market_retrain complete ===")
 
 
+# ── Quick auth test (dev-only, not scheduled) ──────────────────────────────────
+
+@app.function(image=image, secrets=secrets, timeout=60)
+def test_kalshi_auth():
+    """Quick sanity-check for Kalshi production API auth. Run: modal run modal_app.py::test_kalshi_auth"""
+    from data.scrapers.kalshi_history import _get
+    print("[test] Testing Kalshi production API auth...")
+    try:
+        data = _get("/series", {"limit": 3})
+        series = data.get("series", [])
+        print(f"[test] SUCCESS — got {len(series)} series from Kalshi production API")
+        if series:
+            print(f"[test] First series: {series[0].get('ticker', 'unknown')}")
+        return True
+    except Exception as exc:
+        print(f"[test] FAILED: {exc}")
+        return False
+
+
 # ── 8. Initial setup ──────────────────────────────────────────────────────────
 
 @app.function(
