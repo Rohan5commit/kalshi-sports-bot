@@ -12,6 +12,43 @@ from supabase import create_client, Client
 
 _GAME_TABLES = {"NBA": "nba_game_logs", "NFL": "nfl_game_logs", "MLB": "mlb_game_logs"}
 
+_NFL_NAME_TO_ABBREV = {
+    "Arizona Cardinals": "ARI", "Atlanta Falcons": "ATL", "Baltimore Ravens": "BAL",
+    "Buffalo Bills": "BUF", "Carolina Panthers": "CAR", "Chicago Bears": "CHI",
+    "Cincinnati Bengals": "CIN", "Cleveland Browns": "CLE", "Dallas Cowboys": "DAL",
+    "Denver Broncos": "DEN", "Detroit Lions": "DET", "Green Bay Packers": "GB",
+    "Houston Texans": "HOU", "Indianapolis Colts": "IND", "Jacksonville Jaguars": "JAX",
+    "Kansas City Chiefs": "KC", "Las Vegas Raiders": "LV", "Oakland Raiders": "LV",
+    "Los Angeles Chargers": "LAC", "San Diego Chargers": "LAC",
+    "Los Angeles Rams": "LA", "St. Louis Rams": "LA",
+    "Miami Dolphins": "MIA", "Minnesota Vikings": "MIN",
+    "New England Patriots": "NE", "New Orleans Saints": "NO",
+    "New York Giants": "NYG", "New York Jets": "NYJ",
+    "Philadelphia Eagles": "PHI", "Pittsburgh Steelers": "PIT",
+    "San Francisco 49ers": "SF", "Seattle Seahawks": "SEA",
+    "Tampa Bay Buccaneers": "TB", "Tennessee Titans": "TEN",
+    "Washington Commanders": "WAS", "Washington Football Team": "WAS",
+    "Washington Redskins": "WAS",
+}
+
+_MLB_NAME_TO_ABBREV = {
+    "Arizona Diamondbacks": "ARI", "Atlanta Braves": "ATL", "Baltimore Orioles": "BAL",
+    "Boston Red Sox": "BOS", "Chicago Cubs": "CHC", "Chicago White Sox": "CWS",
+    "Cincinnati Reds": "CIN", "Cleveland Guardians": "CLE", "Cleveland Indians": "CLE",
+    "Colorado Rockies": "COL", "Detroit Tigers": "DET", "Houston Astros": "HOU",
+    "Kansas City Royals": "KC", "Los Angeles Angels": "LAA", "Los Angeles Dodgers": "LAD",
+    "Miami Marlins": "MIA", "Milwaukee Brewers": "MIL", "Minnesota Twins": "MIN",
+    "New York Mets": "NYM", "New York Yankees": "NYY",
+    "Oakland Athletics": "ATH", "Athletics": "ATH",
+    "Philadelphia Phillies": "PHI", "Pittsburgh Pirates": "PIT",
+    "San Diego Padres": "SD", "San Francisco Giants": "SF",
+    "Seattle Mariners": "SEA", "St. Louis Cardinals": "STL",
+    "Tampa Bay Rays": "TB", "Texas Rangers": "TEX",
+    "Toronto Blue Jays": "TOR", "Washington Nationals": "WAS",
+}
+
+_SPORT_ABBREV_MAP = {"NFL": _NFL_NAME_TO_ABBREV, "MLB": _MLB_NAME_TO_ABBREV}
+
 _SB_CLIENT = None
 _SB_LOCK = threading.Lock()
 
@@ -99,12 +136,25 @@ def upsert_game_logs(sport: str, logs: list):
 
 
 def get_game_logs(sport: str, since_date: Optional[date] = None,
-                  limit: int = 10000) -> list:
+                  limit: int = 50000) -> list:
     try:
-        q = _sb().table(_GAME_TABLES[sport]).select("*").order("game_date").limit(limit)
-        if since_date:
-            q = q.gte("game_date", str(since_date))
-        return q.execute().data
+        table = _GAME_TABLES[sport]
+        all_rows: list = []
+        page_size = 1000
+        offset = 0
+        while len(all_rows) < limit:
+            q = (_sb().table(table).select("*")
+                 .order("game_date").range(offset, offset + page_size - 1))
+            if since_date:
+                q = q.gte("game_date", str(since_date))
+            rows = q.execute().data
+            if not rows:
+                break
+            all_rows.extend(rows)
+            if len(rows) < page_size:
+                break
+            offset += page_size
+        return all_rows
     except Exception as exc:
         print(f"get_game_logs error: {exc}")
         return []
@@ -351,21 +401,39 @@ def upsert_polymarket_game_matches(records: list):
             print(f"upsert_polymarket_game_matches error: {exc}")
 
 
+def _paginate_market_table(sb, table: str, sport: str) -> list:
+    rows, offset, page_size = [], 0, 1000
+    while True:
+        batch = (sb.table(table).select("*").eq("sport", sport)
+                 .range(offset, offset + page_size - 1).execute().data)
+        if not batch:
+            break
+        rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        offset += page_size
+    return rows
+
+
 def get_market_features_for_sport(sport: str) -> dict:
-    """Return {espn_game_id: market_feature_dict} for enriching game log records."""
+    """Return features keyed by espn_game_id AND by 'game_date_homeabbrev' for cross-format matching."""
     result: dict = {}
     sb = _sb()
+    abbrev_map = _SPORT_ABBREV_MAP.get(sport, {})
+
+    def _add(r: dict, feats: dict):
+        gid = r.get("espn_game_id", "")
+        if gid:
+            result.setdefault(gid, {}).update(feats)
+        gdate = r.get("game_date", "")
+        home = r.get("home_team", "")
+        abbrev = abbrev_map.get(home, "")
+        if gdate and abbrev:
+            result.setdefault(f"{gdate}_{abbrev}", {}).update(feats)
 
     try:
-        rows = (sb.table("kalshi_game_matches")
-                  .select("*").eq("sport", sport).execute().data)
-        for r in rows:
-            gid = r.get("espn_game_id", "")
-            if not gid:
-                continue
-            if gid not in result:
-                result[gid] = {}
-            result[gid].update({
+        for r in _paginate_market_table(sb, "kalshi_game_matches", sport):
+            _add(r, {
                 "kalshi_open_price": r.get("open_price") or 0.5,
                 "kalshi_close_price": r.get("close_price") or 0.5,
                 "kalshi_price_movement": r.get("price_movement") or 0.0,
@@ -380,20 +448,14 @@ def get_market_features_for_sport(sport: str) -> dict:
         print(f"get_market_features (kalshi/{sport}) error: {exc}")
 
     try:
-        rows = (sb.table("polymarket_game_matches")
-                  .select("*").eq("sport", sport).execute().data)
-        for r in rows:
+        for r in _paginate_market_table(sb, "polymarket_game_matches", sport):
             gid = r.get("espn_game_id", "")
-            if not gid:
-                continue
-            if gid not in result:
-                result[gid] = {}
-            prev = result[gid]
+            prev = result.get(gid, {})
             k_vol = float(prev.get("kalshi_total_volume") or 0)
             p_vol = float(r.get("total_volume") or 0)
             k_close = float(prev.get("kalshi_close_price") or 0.5)
             p_close = float(r.get("close_price") or 0.5)
-            result[gid].update({
+            _add(r, {
                 "poly_open_price": r.get("open_price") or 0.5,
                 "poly_close_price": p_close,
                 "poly_price_movement": r.get("price_movement") or 0.0,
@@ -403,8 +465,7 @@ def get_market_features_for_sport(sport: str) -> dict:
                 "poly_max_single_move": r.get("max_single_move") or 0.0,
                 "poly_days_open": r.get("days_open") or 0,
                 "kalshi_vs_poly_spread": k_close - p_close,
-                "kalshi_vs_poly_volume_ratio": (k_vol / (p_vol + 1e-6)
-                                                if p_vol > 0 else 0.0),
+                "kalshi_vs_poly_volume_ratio": (k_vol / (p_vol + 1e-6) if p_vol > 0 else 0.0),
             })
     except Exception as exc:
         print(f"get_market_features (polymarket/{sport}) error: {exc}")
