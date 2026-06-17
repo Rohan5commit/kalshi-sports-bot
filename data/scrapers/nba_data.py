@@ -4,7 +4,7 @@ basketball-reference.com is accessible from cloud IPs (stats.nba.com blocks Moda
 """
 import time
 import hashlib
-from datetime import datetime, date
+from datetime import datetime, date as _date
 
 _BR_ABBREV = {
     "ATLANTA HAWKS": "ATL", "BOSTON CELTICS": "BOS", "BROOKLYN NETS": "BKN",
@@ -64,7 +64,7 @@ def _games_to_records(games: list) -> list:
             continue
 
         game_date_raw = g.get("date") or g.get("start_time")
-        if isinstance(game_date_raw, (datetime, date)):
+        if isinstance(game_date_raw, (datetime, _date)):
             game_date = game_date_raw.strftime("%Y-%m-%d")
         elif isinstance(game_date_raw, str):
             game_date = game_date_raw[:10]
@@ -87,15 +87,24 @@ def _games_to_records(games: list) -> list:
 
 
 def ingest_full_history(seasons: list, incremental_from=None) -> list:
-    """Pull NBA game logs from basketball-reference.com for given NBA start seasons."""
+    """Pull NBA game logs from basketball-reference.com for given NBA start seasons.
+
+    In incremental mode, skips seasons that ended in a prior calendar year to avoid
+    exhausting basketball-reference.com's rate limit on already-loaded data.
+    """
     all_logs: list = []
+    current_year = _date.today().year
     for season in seasons:
         season_end_year = season + 1  # e.g. 2022 start → 2023 end year
+        # In incremental mode, skip seasons fully in prior years — data already loaded
+        if incremental_from and season_end_year < current_year:
+            print(f"[NBA] BR {season} ({season}-{str(season_end_year)[-2:]}): already loaded, skipping fetch")
+            continue
         games = _get_season(season_end_year)
         records = _games_to_records(games)
         if incremental_from:
             records = [g for g in records if g.get("game_date", "") > str(incremental_from)]
         all_logs.extend(records)
         print(f"[NBA] BR {season} ({season}-{str(season_end_year)[-2:]}): {len(records)} games")
-        time.sleep(5.0)  # extra cooldown between seasons to avoid BR rate limiting
+        time.sleep(5.0)
     return all_logs
