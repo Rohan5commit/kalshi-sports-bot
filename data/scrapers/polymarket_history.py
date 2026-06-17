@@ -60,37 +60,7 @@ def get_all_sports_markets() -> list:
     except Exception as exc:
         print(f"[Polymarket] Gamma API error: {exc}")
 
-    # Also try CLOB markets endpoint
-    try:
-        clob_markets = []
-        next_cursor = None
-        while True:
-            params = {"limit": 500}
-            if next_cursor:
-                params["next_cursor"] = next_cursor
-            data = _get(CLOB, "/markets", params)
-            batch = data.get("data", [])
-            sports_batch = [
-                m for m in batch
-                if any(kw in (m.get("question", "") + m.get("description", "")).lower()
-                       for kw in SPORTS_KEYWORDS)
-                and not m.get("active", True)  # closed markets only
-            ]
-            clob_markets.extend(sports_batch)
-            next_cursor = data.get("next_cursor")
-            if not next_cursor or not batch:
-                break
-            time.sleep(0.3)
-        print(f"[Polymarket] CLOB API: {len(clob_markets)} additional sports markets")
-        # Merge, deduplicate by condition_id
-        existing_ids = {m.get("condition_id") or m.get("id") for m in markets}
-        for m in clob_markets:
-            mid = m.get("condition_id") or m.get("id")
-            if mid not in existing_ids:
-                markets.append(m)
-                existing_ids.add(mid)
-    except Exception as exc:
-        print(f"[Polymarket] CLOB markets error: {exc}")
+    # CLOB markets endpoint skipped — Gamma API covers all closed sports markets
 
     return markets
 
