@@ -147,7 +147,8 @@ def _avg(history: list, key: str, n: int, default: float = 0.0) -> float:
 # ── Market feature enrichment ──────────────────────────────────────────────────
 
 def _enrich_with_market_features(sport: str, game_logs: list) -> list:
-    """Merge Kalshi/Polymarket features into game log records by game_id."""
+    """Merge Kalshi/Polymarket features into game log records.
+    Tries ESPN game_id first, then falls back to game_date+home_team_abbrev key."""
     try:
         from db.historical_store import get_market_features_for_sport
         market_feats = get_market_features_for_sport(sport)
@@ -156,9 +157,12 @@ def _enrich_with_market_features(sport: str, game_logs: list) -> list:
             return game_logs
         enriched = 0
         for g in game_logs:
-            gid = g.get("game_id", "")
-            if gid in market_feats:
-                g.update(market_feats[gid])
+            feats = market_feats.get(g.get("game_id", ""))
+            if not feats:
+                dk = f"{g.get('game_date', '')}_{g.get('home_team', '')}"
+                feats = market_feats.get(dk)
+            if feats:
+                g.update(feats)
                 enriched += 1
         print(f"[{sport}] Market feature enrichment: {enriched}/{len(game_logs)} games matched")
     except Exception as exc:
