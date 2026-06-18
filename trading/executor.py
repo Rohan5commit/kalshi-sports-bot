@@ -147,7 +147,8 @@ def execute_for_sport(
         try:
             # Build features
             feature_dict = build_features_for_game(
-                sport, home_id, away_id, home_team, away_team
+                sport, home_team, away_team,
+                game_meta={"home_id": home_id, "away_id": away_id},
             )
             feature_vec = features_to_vector(feature_dict, sport)
 
