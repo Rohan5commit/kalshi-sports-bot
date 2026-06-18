@@ -83,8 +83,8 @@ def get_market_price_history(clob_token_id: str) -> list:
         return []
     try:
         data = _get(CLOB, "/prices-history", {
-            "market_id": clob_token_id,
-            "interval": "1h",
+            "market": clob_token_id,
+            "interval": "max",
             "fidelity": 60,
         })
         return data.get("history", [])
