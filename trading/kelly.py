@@ -30,6 +30,10 @@ def compute_kelly_bet(
             should_bet (bool), bet_size_usd (float), edge (float),
             side (str: 'yes'/'no'), reason (str)
     """
+    if kalshi_yes_price <= 0 or kalshi_yes_price >= 100:
+        return {"should_bet": False, "bet_size_usd": 0.0, "edge": 0.0,
+                "side": "yes", "reason": "invalid_price"}
+
     implied_prob = kalshi_yes_price / 100.0
 
     # Determine side: bet on YES if model says home wins, NO otherwise
