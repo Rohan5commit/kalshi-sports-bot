@@ -32,7 +32,7 @@ SECRET_KAGGLE = "kaggle-secret"
 
 # Email
 REPORT_FROM_EMAIL = "rohan.santhoshkumar1@gmail.com"
-REPORT_TO_EMAIL = "rohan.santhoshkumar1@gmail.com"
+REPORT_TO_EMAIL = "rohan.santhoshkumar@gmail.com"
 SMTP_DEFAULT_HOST = "smtp.gmail.com"
 SMTP_DEFAULT_PORT = 587
 
