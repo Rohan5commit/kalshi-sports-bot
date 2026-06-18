@@ -75,8 +75,6 @@ def _get(path: str, params: dict = None, retries: int = 3) -> dict:
             if r.status_code == 429:
                 time.sleep(5 * (attempt + 1))
                 continue
-            if r.status_code == 401:
-                print(f"[Kalshi] 401 response body: {r.text[:300]}")
             r.raise_for_status()
             return r.json()
         except Exception as exc:
