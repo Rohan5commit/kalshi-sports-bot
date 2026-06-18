@@ -350,12 +350,23 @@ def nightly_retrain():
 
             since_date = run_date - timedelta(days=ROLLING_ACCURACY_WINDOW)
             history = get_resolved_games_since(sport, since_date)
-            total = len(history)
-            correct = sum(
-                1 for r in history
-                if ((r.get("final_prob") or 0.5) >= 0.5) ==
-                   (r.get("trade_status") in ("won",))
-            )
+            # Build outcome map from actual game logs (home_win truth)
+            all_logs_recent = [
+                g for g in get_game_logs(sport)
+                if g.get("game_date", "") >= str(since_date)
+            ]
+            outcome_map = {
+                f"{g.get('game_date','')}_{g.get('home_team','')}_{g.get('away_team','')}": bool(g.get("home_win", False))
+                for g in all_logs_recent
+            }
+            total = 0
+            correct = 0
+            for r in history:
+                key = f"{r.get('game_date','')}_{r.get('home_team','')}_{r.get('away_team','')}"
+                if key in outcome_map:
+                    total += 1
+                    if ((r.get("final_prob") or 0.5) >= 0.5) == outcome_map[key]:
+                        correct += 1
             accuracy = correct / total if total > 0 else 0.5
             retrain_triggered = False
             print(f"[{sport}] 14d accuracy: {accuracy:.3f} ({total} preds)")
@@ -382,7 +393,7 @@ def nightly_retrain():
 
 @app.function(
     image=image, secrets=secrets,
-    schedule=modal.Cron("30 4 * * *"), timeout=300,
+    schedule=modal.Cron("0 6 * * *"), timeout=300,
 )
 def send_daily_email():
     run_date = datetime.utcnow().date()
