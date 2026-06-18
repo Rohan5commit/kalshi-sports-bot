@@ -36,16 +36,48 @@ def _public_request(method: str, endpoint: str, **kwargs) -> Optional[dict]:
     return None
 
 
-def _authed_request(method: str, endpoint: str, **kwargs) -> Optional[dict]:
-    """Authenticated request for trading endpoints."""
-    url = f"{BASE_URL}{endpoint}"
-    headers = {
-        "Authorization": f"Bearer {os.environ['KALSHI_API_KEY']}",
+def _make_rsa_headers(method: str, endpoint: str) -> dict:
+    """RSA-PSS signed headers for Kalshi production API."""
+    import base64 as _b64
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.backends import default_backend
+
+    key_id = os.environ.get("KALSHI_API_KEY_ID", "")
+    pem = os.environ.get("KALSHI_PRIVATE_KEY", "")
+    if not key_id or not pem:
+        return {"Content-Type": "application/json"}
+    if "\\n" in pem:
+        pem = pem.replace("\\n", "\n")
+    ts = str(int(time.time() * 1000))
+    msg = (ts + method.upper() + endpoint).encode("utf-8")
+    try:
+        private_key = serialization.load_pem_private_key(
+            pem.encode(), password=None, backend=default_backend()
+        )
+    except Exception as exc:
+        log_error(context="kalshi_client._make_rsa_headers", error_msg=str(exc), tb="")
+        return {"Content-Type": "application/json"}
+    sig = private_key.sign(
+        msg,
+        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
+        hashes.SHA256(),
+    )
+    return {
+        "KALSHI-ACCESS-KEY": key_id,
+        "KALSHI-ACCESS-SIGNATURE": _b64.b64encode(sig).decode(),
+        "KALSHI-ACCESS-TIMESTAMP": ts,
         "Content-Type": "application/json",
     }
+
+
+def _authed_request(method: str, endpoint: str, **kwargs) -> Optional[dict]:
+    """Authenticated request for trading endpoints using RSA-PSS signing."""
+    url = f"{BASE_URL}{endpoint}"
     last_exc = None
     for attempt in range(MAX_RETRIES):
         try:
+            headers = _make_rsa_headers(method, endpoint)
             resp = requests.request(method, url, headers=headers, timeout=20, **kwargs)
             resp.raise_for_status()
             return resp.json()
@@ -63,7 +95,7 @@ def _authed_request(method: str, endpoint: str, **kwargs) -> Optional[dict]:
 
 # ── Public market data ─────────────────────────────────────────────────────────
 
-def get_markets(status: str = "open", limit: int = 200) -> list:
+def get_markets(status: str = "open", limit: int = 1000) -> list:
     """Fetch open sports markets."""
     data = _public_request("GET", "/markets", params={"status": status, "category": "sports", "limit": limit})
     return (data or {}).get("markets", [])
@@ -91,7 +123,7 @@ def get_implied_probability(market: dict) -> float:
 
 def search_sports_markets(home_team: str, away_team: str, sport: str) -> list:
     """Search open sports markets for a specific game matchup."""
-    all_markets = get_markets(limit=200)
+    all_markets = get_markets(limit=1000)
     home_lower = home_team.lower()
     away_lower = away_team.lower()
     sport_lower = sport.lower()
