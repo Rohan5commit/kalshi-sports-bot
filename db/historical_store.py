@@ -141,6 +141,13 @@ def upsert_game_logs(sport: str, logs: list):
     table = _GAME_TABLES[sport]
     for i in range(0, len(logs), 500):
         chunk = _clean(logs[i:i + 500])
+        # deduplicate by game_id — keep last occurrence to avoid ON CONFLICT affecting same row twice
+        seen: dict = {}
+        for row in chunk:
+            gid = row.get("game_id")
+            if gid:
+                seen[gid] = row
+        chunk = list(seen.values()) if seen else chunk
         try:
             sb.table(table).upsert(chunk, on_conflict="game_id").execute()
             print(f"[{sport}] upserted {len(chunk)} logs (chunk {i // 500})")
@@ -498,3 +505,4 @@ def log_dropped_rows(records: list):
             sb.table("dropped_rows").insert(chunk).execute()
         except Exception as exc:
             print(f"log_dropped_rows error chunk {i}: {exc}")
+
