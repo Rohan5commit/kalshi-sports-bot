@@ -79,11 +79,8 @@ def incremental_retrain(sport: str, new_game_logs: list, model: xgb.XGBClassifie
         xgb_model=booster,
     )
 
-    new_model = xgb.XGBClassifier(**XGB_PARAMS)
-    new_model._Booster = updated_booster
-    new_model.n_classes_ = 2
-    new_model.classes_ = np.array([0, 1])
-    return new_model
+    model._Booster = updated_booster
+    return model
 
 
 def predict_proba(model: xgb.XGBClassifier, feature_vector: np.ndarray) -> float:
@@ -139,3 +136,4 @@ def compute_rolling_accuracy(sport: str, predictions_with_outcomes: list, window
             correct += 1
 
     return correct / len(recent) if recent else 0.5
+
