@@ -18,7 +18,7 @@ from data.features import build_features_for_game, features_to_vector, SPORT_FEA
 from models import xgboost_model, bayesian_model, meta_learner, calibration
 from trading.kalshi_client import (
     search_sports_markets, get_implied_probability, get_balance,
-    place_order, usd_to_contracts,
+    place_order, usd_to_contracts, parse_bundle_legs,
 )
 from trading.kelly import compute_kelly_bet
 from db.supabase_client import (
@@ -173,18 +173,41 @@ def execute_for_sport(
                 continue
 
             market = kalshi_markets[0]
+            is_bundle = bool(market.get("_is_bundle"))
             kalshi_implied = get_implied_probability(market)
             kalshi_yes_price = int(market.get("yes_price", 50) or 50)
 
+            # For bundle/parlay markets, estimate our probability for the whole bundle.
+            # We assume our model has edge only on the matched leg; all other legs
+            # are assumed to hit at the market's implied per-leg probability.
+            # effective_prob = (our_leg_prob / implied_per_leg) * bundle_price
+            # Also apply 2x edge threshold to account for parlay variance.
+            if is_bundle and kalshi_yes_price > 0:
+                bundle_legs = parse_bundle_legs(market.get("title", ""))
+                n_legs = max(len(bundle_legs), 1)
+                bundle_price = kalshi_yes_price / 100.0
+                implied_per_leg = bundle_price ** (1.0 / n_legs)
+                effective_model_prob = max(0.0, min(1.0,
+                    (final_prob / implied_per_leg) * bundle_price if implied_per_leg > 0 else bundle_price
+                ))
+                effective_min_edge = eff_min_edge * 2.0
+            else:
+                effective_model_prob = final_prob
+                effective_min_edge = eff_min_edge
+
             # Kelly sizing
             kelly_result = compute_kelly_bet(
-                model_prob=final_prob,
+                model_prob=effective_model_prob,
                 kalshi_yes_price=kalshi_yes_price,
                 bankroll=bankroll,
-                min_edge=eff_min_edge,
+                min_edge=effective_min_edge,
             )
 
-            decision = "bet" if kelly_result["should_bet"] else "skip"
+            decision = (
+                "bet_bundle" if (kelly_result["should_bet"] and is_bundle) else
+                "bet" if kelly_result["should_bet"] else
+                "skip"
+            )
             edge = kelly_result["edge"]
 
             pred_id = log_prediction(
