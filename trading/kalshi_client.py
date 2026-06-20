@@ -121,18 +121,67 @@ def get_implied_probability(market: dict) -> float:
     return float(yes_ask) / 100.0
 
 
+def parse_bundle_legs(title: str) -> list:
+    """Parse a KXMVESPORTSMULTIGAMEEXTENDED title into individual leg dicts."""
+    legs = []
+    for part in (title or "").split(","):
+        part = part.strip()
+        if part.startswith("yes "):
+            legs.append({"direction": "yes", "description": part[4:].strip()})
+        elif part.startswith("no "):
+            legs.append({"direction": "no", "description": part[3:].strip()})
+    return legs
+
+
+def _city_tokens(team_name: str) -> list:
+    """First 1-2 words of a team name used to match city in bundle leg descriptions."""
+    words = team_name.lower().split()
+    tokens = []
+    if len(words) >= 2:
+        tokens.append(f"{words[0]} {words[1]}")
+    if words:
+        tokens.append(words[0])
+    return [t for t in tokens if len(t) >= 3]
+
+
 def search_sports_markets(home_team: str, away_team: str, sport: str) -> list:
-    """Search open sports markets for a specific game matchup."""
+    """Search open sports markets for a specific game matchup.
+
+    Priority:
+    1. Individual game markets (title contains team name + sport keyword).
+    2. Multi-game bundle markets where one leg matches our team (Kalshi's current format).
+       Bundle markets are flagged with _is_bundle=True for downstream handling.
+    """
     all_markets = get_markets(limit=1000)
     home_lower = home_team.lower()
     away_lower = away_team.lower()
     sport_lower = sport.lower()
-    matches = []
+
+    # Primary: individual game markets
+    individual = []
     for market in all_markets:
         combined = ((market.get("title") or "") + " " + (market.get("subtitle") or "")).lower()
         if (home_lower in combined or away_lower in combined) and sport_lower in combined:
-            matches.append(market)
-    return matches
+            individual.append(market)
+    if individual:
+        return individual
+
+    # Fallback: bundle/parlay markets containing our team as a leg
+    home_tokens = _city_tokens(home_team)
+    away_tokens = _city_tokens(away_team)
+    bundle_matches = []
+    for market in all_markets:
+        ticker = market.get("ticker", "")
+        if "MULTIGAME" not in ticker and "CROSSCATEGORY" not in ticker:
+            continue
+        title = (market.get("title") or "").lower()
+        for leg in parse_bundle_legs(title):
+            desc = leg["description"]
+            if any(t in desc for t in home_tokens) or any(t in desc for t in away_tokens):
+                market["_is_bundle"] = True
+                bundle_matches.append(market)
+                break
+    return bundle_matches
 
 
 # ── Authenticated trading endpoints ───────────────────────────────────────────
