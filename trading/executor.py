@@ -149,33 +149,15 @@ def execute_for_sport(
                 else:
                     live_kalshi_price = raw_cents / 100.0
 
-            # Determine best probability signal
+            # Vegas moneyline is the only signal we trust.
+            # ML models are untrained and produce noise — skip when no Vegas line.
             xgb_prob = bn_prob = 0.5
-            if vegas_home_prob is not None:
-                # Vegas is the primary signal — it's calibrated and accounts for all info
-                final_prob = vegas_home_prob
-                signal_source = f"vegas({vegas_home_prob:.3f})"
-            elif xgb_m is not None and bn_m is not None:
-                # ML fallback — only when Vegas unavailable
-                feature_dict = build_features_for_game(
-                    sport, home_team, away_team,
-                    game_meta={
-                        "home_id": home_id, "away_id": away_id,
-                        "kalshi_open_price": live_kalshi_price,
-                        "kalshi_close_price": live_kalshi_price,
-                        "kalshi_price_at_tipoff": live_kalshi_price,
-                    },
-                )
-                feature_vec = features_to_vector(feature_dict, sport)
-                xgb_prob, bn_prob, final_prob = _run_parallel_inference(
-                    xgb_m, bn_m, meta_m, calib_m, feature_dict, feature_vec, sport
-                )
-                signal_source = f"ml({final_prob:.3f})"
-            else:
-                # No signal available — skip
+            if vegas_home_prob is None:
                 summary["bets_skipped"] += 1
-                print(f"  {home_team} vs {away_team}: no signal (no vegas odds, no trained model)")
+                print(f"  {home_team} vs {away_team}: skip (no Vegas odds available)")
                 continue
+            final_prob = vegas_home_prob
+            signal_source = f"vegas({vegas_home_prob:.3f})"
 
             if not kalshi_markets:
                 log_prediction(
