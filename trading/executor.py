@@ -17,8 +17,8 @@ from config import (
 from data.features import build_features_for_game, features_to_vector, SPORT_FEATURES
 from models import xgboost_model, bayesian_model, meta_learner, calibration
 from trading.kalshi_client import (
-    search_sports_markets, get_implied_probability, get_balance,
-    place_order, usd_to_contracts, parse_bundle_legs,
+    search_sports_markets, get_implied_probability, get_yes_price_cents,
+    get_balance, place_order, usd_to_contracts, parse_bundle_legs,
 )
 from trading.kelly import compute_kelly_bet
 from db.supabase_client import (
@@ -175,7 +175,7 @@ def execute_for_sport(
             market = kalshi_markets[0]
             is_bundle = bool(market.get("_is_bundle"))
             kalshi_implied = get_implied_probability(market)
-            kalshi_yes_price = int(market.get("yes_price", 50) or 50)
+            kalshi_yes_price = get_yes_price_cents(market)
 
             # For bundle/parlay markets, estimate our probability for the whole bundle.
             # We assume our model has edge only on the matched leg; all other legs
