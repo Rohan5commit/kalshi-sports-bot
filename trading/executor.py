@@ -142,11 +142,14 @@ def execute_for_sport(
         away_team = game.get("away_team", "")
         home_id = game.get("home_id", "")
         away_id = game.get("away_id", "")
+        home_abbr = game.get("home_abbr", "")
+        away_abbr = game.get("away_abbr", "")
         game_id = game.get("id", "")
 
         try:
             # Find Kalshi market first so we can pass live price into features
-            kalshi_markets = search_sports_markets(home_team, away_team, sport)
+            kalshi_markets = search_sports_markets(home_team, away_team, sport,
+                                                   home_abbr=home_abbr, away_abbr=away_abbr)
             live_kalshi_price = 0.5
             if kalshi_markets:
                 live_kalshi_price = get_yes_price_cents(kalshi_markets[0]) / 100.0
