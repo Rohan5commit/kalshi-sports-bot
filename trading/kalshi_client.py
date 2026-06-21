@@ -199,51 +199,92 @@ def _get_event_markets(event_ticker: str) -> list:
     return (data or {}).get("markets", [])
 
 
-def _home_market_from_event(event_ticker: str, markets: list) -> Optional[dict]:
+def _home_market_from_event(event_ticker: str, markets: list,
+                             home_abbr: str = "") -> Optional[dict]:
     """
     Return the market where yes = home team wins.
-    Convention: event ticker ends with {AWAY_CODE}{HOME_CODE}.
-    The home market's ticker suffix equals HOME_CODE (the trailing part of teams_code).
-    e.g. KXMLBGAME-26JUN232145ATHSF → teams_code=ATHSF → home suffix=SF.
+    Priority: match home_abbr against market ticker suffix (exact).
+    Fallback: convention KXMLBGAME-..AWAYHOME → home suffix = trailing part of teams_code.
     """
-    # Extract the teams_code by stripping the date+time prefix from the last segment
+    if home_abbr:
+        home_variants = _abbr_variants(home_abbr)
+        for m in markets:
+            suffix = (m.get("ticker") or "").split("-")[-1].upper()
+            if suffix in home_variants:
+                return m
+
+    # Fallback: trailing-code convention
     seg = event_ticker.split("-")[-1]
     teams_code = re.sub(r'^\d{2}\w{3}\d{2}(?:\d{4})?', '', seg)
-    if not teams_code:
-        return markets[0] if markets else None
-    for m in markets:
-        suffix = (m.get("ticker") or "").split("-")[-1]
-        if suffix and teams_code.endswith(suffix):
-            return m
+    if teams_code:
+        for m in markets:
+            suffix = (m.get("ticker") or "").split("-")[-1]
+            if suffix and teams_code.endswith(suffix):
+                return m
     return markets[0] if markets else None
+
+
+def _abbr_variants(abbr: str) -> list:
+    """Return all known abbreviation variants for a team code."""
+    abbr = abbr.upper()
+    variants = {abbr}
+    _MAP = {
+        "CHW": "CWS", "CWS": "CHW",
+        "ARI": "AZ",  "AZ":  "ARI",
+        "ATH": "OAK", "OAK": "ATH",
+        "WSH": "WAS", "WAS": "WSH",
+        "KCR": "KC",  "KC":  "KCR",
+        "TBR": "TB",  "TB":  "TBR",
+        "SFG": "SF",  "SF":  "SFG",
+        "LAD": "LA",  "LA":  "LAD",
+        "LAA": "ANA", "ANA": "LAA",
+    }
+    if abbr in _MAP:
+        variants.add(_MAP[abbr])
+    return variants
+
+
+def _event_matches_game_by_codes(event_ticker: str, markets: list,
+                                  home_abbr: str, away_abbr: str) -> bool:
+    """Match a Kalshi event to a game using ESPN abbreviations vs market ticker suffixes."""
+    home_variants = _abbr_variants(home_abbr)
+    away_variants = _abbr_variants(away_abbr)
+    codes = {m.get("ticker","").split("-")[-1].upper() for m in markets}
+    home_match = bool(codes & home_variants)
+    away_match = bool(codes & away_variants)
+    return home_match and away_match
 
 
 def _event_matches_game(event: dict, home_tokens: list, away_tokens: list,
                          home_lower: str, away_lower: str) -> bool:
     """
-    Check whether a Kalshi event corresponds to our home vs away game.
-    Event title format: "Away vs Home".
+    Fallback text-based match: BOTH teams must appear in the event title.
+    Event title format: "Away vs Home" (Kalshi uses city/short names).
     """
     title = (event.get("title") or "").lower()
     sides = [s.strip() for s in title.split(" vs ")]
     if len(sides) < 2:
         return False
-    away_side, home_side = sides[0], sides[-1]
+    side_a, side_b = sides[0], sides[-1]
 
-    home_match = (
-        any(t in home_side for t in home_tokens) or
-        home_lower in home_side or
-        any(w in home_lower for w in home_side.split() if len(w) >= 4)
-    )
-    away_match = (
-        any(t in away_side for t in away_tokens) or
-        away_lower in away_side or
-        any(w in away_lower for w in away_side.split() if len(w) >= 4)
-    )
-    return home_match or away_match
+    def _matches_side(side, tokens, full_name):
+        return (
+            any(t in side for t in tokens) or
+            full_name in side or
+            any(w in full_name for w in side.split() if len(w) >= 4)
+        )
+
+    home_in_a = _matches_side(side_a, home_tokens, home_lower)
+    home_in_b = _matches_side(side_b, home_tokens, home_lower)
+    away_in_a = _matches_side(side_a, away_tokens, away_lower)
+    away_in_b = _matches_side(side_b, away_tokens, away_lower)
+
+    # Both teams must appear on different sides
+    return (home_in_a and away_in_b) or (home_in_b and away_in_a)
 
 
-def search_sports_markets(home_team: str, away_team: str, sport: str) -> list:
+def search_sports_markets(home_team: str, away_team: str, sport: str,
+                           home_abbr: str = "", away_abbr: str = "") -> list:
     """
     Find the Kalshi market(s) for a specific game.
 
@@ -257,14 +298,24 @@ def search_sports_markets(home_team: str, away_team: str, sport: str) -> list:
     away_lower = away_team.lower()
     home_tokens = _city_tokens(home_team)
     away_tokens = _city_tokens(away_team)
+    home_abbr_up = (home_abbr or "").upper()
+    away_abbr_up = (away_abbr or "").upper()
 
     # ── Priority 1: dedicated game event series ────────────────────────────────
     events = _get_game_events(sport)
     for event in events:
-        if _event_matches_game(event, home_tokens, away_tokens, home_lower, away_lower):
-            event_ticker = event.get("event_ticker", "")
-            markets = _get_event_markets(event_ticker)
-            home_market = _home_market_from_event(event_ticker, markets)
+        event_ticker = event.get("event_ticker", "")
+        markets = _get_event_markets(event_ticker)
+
+        # Prefer abbr-based matching (exact) over text matching (fuzzy)
+        matched = False
+        if home_abbr_up and away_abbr_up:
+            matched = _event_matches_game_by_codes(event_ticker, markets, home_abbr_up, away_abbr_up)
+        if not matched:
+            matched = _event_matches_game(event, home_tokens, away_tokens, home_lower, away_lower)
+
+        if matched:
+            home_market = _home_market_from_event(event_ticker, markets, home_abbr_up)
             if home_market:
                 print(f"[kalshi] matched game event {event_ticker} → {home_market.get('ticker')}")
                 return [home_market]
@@ -301,7 +352,14 @@ def search_sports_markets(home_team: str, away_team: str, sport: str) -> list:
 def get_balance() -> float:
     """Return available balance in USD."""
     data = _authed_request("GET", "/portfolio/balance")
-    return float((data or {}).get("balance", 0)) / 100.0
+    if data is None:
+        return 0.0
+    # API returns balance in cents (integer) — convert to dollars
+    balance = data.get("balance", 0)
+    try:
+        return float(balance) / 100.0
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def get_open_positions() -> list:
@@ -316,14 +374,17 @@ def place_order(
     price: int,
     order_type: str = "limit",
 ) -> Optional[dict]:
-    """Place a limit order on Kalshi. price in cents (1-99)."""
+    """Place a limit order on Kalshi.
+    price is in cents (1-99) internally; converted to dollar float (0.01-0.99) for API.
+    """
+    yes_price_dollars = round((price if side == "yes" else 100 - price) / 100.0, 4)
     payload = {
         "ticker": market_ticker,
         "action": "buy",
         "side": side,
         "type": order_type,
         "count": count,
-        "yes_price": price if side == "yes" else 100 - price,
+        "yes_price": yes_price_dollars,
     }
     result = _authed_request("POST", "/portfolio/orders", json=payload)
     if result is None:
