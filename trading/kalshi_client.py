@@ -65,7 +65,9 @@ def _make_rsa_headers(method: str, endpoint: str) -> dict:
     if "\\n" in pem:
         pem = pem.replace("\\n", "\n")
     ts = str(int(time.time() * 1000))
-    msg = (ts + method.upper() + endpoint).encode("utf-8")
+    # Kalshi requires the full path including /trade-api/v2 prefix in the signature
+    full_path = f"/trade-api/v2{endpoint}"
+    msg = (ts + method.upper() + full_path).encode("utf-8")
     try:
         private_key = serialization.load_pem_private_key(
             pem.encode(), password=None, backend=default_backend()
