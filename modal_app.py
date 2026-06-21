@@ -540,19 +540,56 @@ def run_market_retrain():
 
 @app.function(image=image, secrets=secrets, timeout=60)
 def test_kalshi_auth():
-    """Quick sanity-check for Kalshi production API auth. Run: modal run modal_app.py::test_kalshi_auth"""
+    """Quick sanity-check for Kalshi production API auth + balance + order test."""
     from data.scrapers.kalshi_history import _get
+    from trading.kalshi_client import _authed_request, get_balance
     print("[test] Testing Kalshi production API auth...")
     try:
         data = _get("/series", {"limit": 3})
         series = data.get("series", [])
-        print(f"[test] SUCCESS — got {len(series)} series from Kalshi production API")
-        if series:
-            print(f"[test] First series: {series[0].get('ticker', 'unknown')}")
-        return True
+        print(f"[test] Public API OK — got {len(series)} series")
     except Exception as exc:
-        print(f"[test] FAILED: {exc}")
+        print(f"[test] Public API FAILED: {exc}")
         return False
+
+    print("[test] Testing authenticated balance endpoint...")
+    try:
+        bal_raw = _authed_request("GET", "/portfolio/balance")
+        print(f"[test] Raw balance response: {bal_raw}")
+        bal = get_balance()
+        print(f"[test] Balance: ${bal:.2f}")
+    except Exception as exc:
+        print(f"[test] Balance FAILED: {exc}")
+
+    print("[test] Testing order placement (1 contract, limit, NYY market)...")
+    try:
+        # Use a real open market ticker — NYY vs CIN game
+        import requests as _req
+        mkts = _req.get(
+            "https://api.elections.kalshi.com/trade-api/v2/markets",
+            params={"event_ticker": "KXMLBGAME-26JUN211335CINNYY", "limit": 5},
+            timeout=15
+        ).json().get("markets", [])
+        if mkts:
+            ticker = mkts[0].get("ticker")
+            yes_ask = float(mkts[0].get("yes_ask_dollars") or 0.5)
+            print(f"[test] Placing test order: ticker={ticker} yes_price={yes_ask}")
+            result = _authed_request("POST", "/portfolio/orders", json={
+                "ticker": ticker,
+                "action": "buy",
+                "side": "yes",
+                "type": "limit",
+                "count": 1,
+                "yes_price": yes_ask,
+            })
+            print(f"[test] Order result: {result}")
+        else:
+            print("[test] No markets found for test order")
+    except Exception as exc:
+        import traceback
+        print(f"[test] Order FAILED: {exc}\n{traceback.format_exc()}")
+
+    return True
 
 
 # ── 8. Initial setup ──────────────────────────────────────────────────────────
