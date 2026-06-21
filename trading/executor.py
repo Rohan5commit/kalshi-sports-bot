@@ -152,7 +152,12 @@ def execute_for_sport(
                                                    home_abbr=home_abbr, away_abbr=away_abbr)
             live_kalshi_price = 0.5
             if kalshi_markets:
-                live_kalshi_price = get_yes_price_cents(kalshi_markets[0]) / 100.0
+                raw_cents = get_yes_price_cents(kalshi_markets[0])
+                if raw_cents == 0:
+                    # Illiquid market (price 0.00 or 1.00) — no valid ask, skip
+                    kalshi_markets = []
+                else:
+                    live_kalshi_price = raw_cents / 100.0
 
             # Build features — pass live Kalshi price so model sees current market
             feature_dict = build_features_for_game(
