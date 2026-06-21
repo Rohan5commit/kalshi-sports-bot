@@ -145,10 +145,21 @@ def execute_for_sport(
         game_id = game.get("id", "")
 
         try:
-            # Build features
+            # Find Kalshi market first so we can pass live price into features
+            kalshi_markets = search_sports_markets(home_team, away_team, sport)
+            live_kalshi_price = 0.5
+            if kalshi_markets:
+                live_kalshi_price = get_yes_price_cents(kalshi_markets[0]) / 100.0
+
+            # Build features — pass live Kalshi price so model sees current market
             feature_dict = build_features_for_game(
                 sport, home_team, away_team,
-                game_meta={"home_id": home_id, "away_id": away_id},
+                game_meta={
+                    "home_id": home_id, "away_id": away_id,
+                    "kalshi_open_price": live_kalshi_price,
+                    "kalshi_close_price": live_kalshi_price,
+                    "kalshi_price_at_tipoff": live_kalshi_price,
+                },
             )
             feature_vec = features_to_vector(feature_dict, sport)
 
@@ -157,8 +168,6 @@ def execute_for_sport(
                 xgb_m, bn_m, meta_m, calib_m, feature_dict, feature_vec, sport
             )
 
-            # Find matching Kalshi market
-            kalshi_markets = search_sports_markets(home_team, away_team, sport)
             if not kalshi_markets:
                 pred_id = log_prediction(
                     sport=sport, game_id=game_id,
@@ -209,6 +218,7 @@ def execute_for_sport(
                 "skip"
             )
             edge = kelly_result["edge"]
+            print(f"  {home_team} vs {away_team}: model={final_prob:.3f} kalshi={kalshi_implied:.2f} edge={edge:+.3f} → {decision} ({kelly_result['reason']})")
 
             pred_id = log_prediction(
                 sport=sport, game_id=game_id,
