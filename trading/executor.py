@@ -1,7 +1,7 @@
 """
 trading/executor.py — Full trade execution pipeline.
-Handles auto-relax threshold management, market matching, Kelly sizing,
-Kalshi API order placement, and Supabase logging.
+Primary signal: Vegas moneyline (DraftKings via ESPN) converted to vig-removed probability.
+ML models used as secondary signal when Vegas odds unavailable.
 """
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -36,10 +36,6 @@ def _run_parallel_inference(
     feature_vec: np.ndarray,
     sport: str,
 ) -> tuple:
-    """
-    Run XGBoost and Bayesian Network inference in parallel.
-    Returns (xgb_prob, bn_prob, final_prob).
-    """
     results = {}
 
     def run_xgb():
@@ -63,7 +59,6 @@ def _run_parallel_inference(
     xgb_prob = results.get("xgb", 0.5)
     bn_prob = results.get("bn", 0.5)
 
-    # Stack and calibrate
     if meta_model is not None:
         raw_prob = meta_learner.predict(meta_model, xgb_prob, bn_prob)
     else:
@@ -78,12 +73,9 @@ def _run_parallel_inference(
 
 
 def get_effective_min_edge() -> float:
-    """Check consecutive dry days and apply auto-relax if needed."""
     dry_days = get_consecutive_dry_days()
     if dry_days < DRY_DAY_THRESHOLD:
         return MIN_EDGE
-
-    # Compute how many relax steps have been triggered
     extra_steps = dry_days - DRY_DAY_THRESHOLD + 1
     relaxed = MIN_EDGE - (extra_steps * AUTO_RELAX_INCREMENT)
     relaxed = max(relaxed, MIN_EDGE - AUTO_RELAX_CAP)
@@ -98,8 +90,12 @@ def execute_for_sport(
 ) -> dict:
     """
     Run full prediction and trading pipeline for one sport.
-    games: list of game dicts from ESPN scraper.
-    Returns dict summarizing trades placed and predictions logged.
+
+    Signal priority:
+    1. Vegas moneyline (DraftKings via ESPN) — calibrated, real consensus probability
+    2. ML models (XGBoost + BN) — used only when Vegas odds absent
+
+    Edge = |vegas_prob - kalshi_implied|. We bet when Kalshi misprices vs Vegas.
     """
     if run_date is None:
         run_date = datetime.utcnow().date()
@@ -107,17 +103,12 @@ def execute_for_sport(
     summary = {"sport": sport, "games_evaluated": 0, "bets_placed": 0,
                "bets_skipped": 0, "errors": []}
 
-    # Load models
+    # Load ML models (optional fallback — won't block if missing)
     xgb_m = xgboost_model.load_model(sport, volume_path)
     bn_m = bayesian_model.load_model(sport, volume_path)
     meta_m = meta_learner.load_model(sport, volume_path)
     calib_m = calibration.load_model(sport, volume_path)
 
-    if xgb_m is None or bn_m is None:
-        summary["errors"].append(f"Models not found for {sport} — skipping")
-        return summary
-
-    # Get effective MIN_EDGE with auto-relax
     eff_min_edge = get_effective_min_edge()
     if eff_min_edge < MIN_EDGE:
         log_threshold_event(
@@ -128,13 +119,12 @@ def execute_for_sport(
             event_date=run_date,
         )
 
-    # Account balance
     try:
         bankroll = get_balance()
         if bankroll <= 0:
-            bankroll = 500.0  # default demo bankroll
+            bankroll = 1000.0
     except Exception:
-        bankroll = 500.0
+        bankroll = 1000.0
 
     for game in games:
         summary["games_evaluated"] += 1
@@ -145,39 +135,50 @@ def execute_for_sport(
         home_abbr = game.get("home_abbr", "")
         away_abbr = game.get("away_abbr", "")
         game_id = game.get("id", "")
+        vegas_home_prob = game.get("vegas_home_prob")  # vig-removed, from ESPN/DraftKings
 
         try:
-            # Find Kalshi market first so we can pass live price into features
+            # Find Kalshi market
             kalshi_markets = search_sports_markets(home_team, away_team, sport,
                                                    home_abbr=home_abbr, away_abbr=away_abbr)
             live_kalshi_price = 0.5
             if kalshi_markets:
                 raw_cents = get_yes_price_cents(kalshi_markets[0])
                 if raw_cents == 0:
-                    # Illiquid market (price 0.00 or 1.00) — no valid ask, skip
                     kalshi_markets = []
                 else:
                     live_kalshi_price = raw_cents / 100.0
 
-            # Build features — pass live Kalshi price so model sees current market
-            feature_dict = build_features_for_game(
-                sport, home_team, away_team,
-                game_meta={
-                    "home_id": home_id, "away_id": away_id,
-                    "kalshi_open_price": live_kalshi_price,
-                    "kalshi_close_price": live_kalshi_price,
-                    "kalshi_price_at_tipoff": live_kalshi_price,
-                },
-            )
-            feature_vec = features_to_vector(feature_dict, sport)
-
-            # Parallel inference
-            xgb_prob, bn_prob, final_prob = _run_parallel_inference(
-                xgb_m, bn_m, meta_m, calib_m, feature_dict, feature_vec, sport
-            )
+            # Determine best probability signal
+            xgb_prob = bn_prob = 0.5
+            if vegas_home_prob is not None:
+                # Vegas is the primary signal — it's calibrated and accounts for all info
+                final_prob = vegas_home_prob
+                signal_source = f"vegas({vegas_home_prob:.3f})"
+            elif xgb_m is not None and bn_m is not None:
+                # ML fallback — only when Vegas unavailable
+                feature_dict = build_features_for_game(
+                    sport, home_team, away_team,
+                    game_meta={
+                        "home_id": home_id, "away_id": away_id,
+                        "kalshi_open_price": live_kalshi_price,
+                        "kalshi_close_price": live_kalshi_price,
+                        "kalshi_price_at_tipoff": live_kalshi_price,
+                    },
+                )
+                feature_vec = features_to_vector(feature_dict, sport)
+                xgb_prob, bn_prob, final_prob = _run_parallel_inference(
+                    xgb_m, bn_m, meta_m, calib_m, feature_dict, feature_vec, sport
+                )
+                signal_source = f"ml({final_prob:.3f})"
+            else:
+                # No signal available — skip
+                summary["bets_skipped"] += 1
+                print(f"  {home_team} vs {away_team}: no signal (no vegas odds, no trained model)")
+                continue
 
             if not kalshi_markets:
-                pred_id = log_prediction(
+                log_prediction(
                     sport=sport, game_id=game_id,
                     home_team=home_team, away_team=away_team,
                     game_date=run_date,
@@ -194,11 +195,6 @@ def execute_for_sport(
             kalshi_implied = get_implied_probability(market)
             kalshi_yes_price = get_yes_price_cents(market)
 
-            # For bundle/parlay markets, estimate our probability for the whole bundle.
-            # We assume our model has edge only on the matched leg; all other legs
-            # are assumed to hit at the market's implied per-leg probability.
-            # effective_prob = (our_leg_prob / implied_per_leg) * bundle_price
-            # Also apply 2x edge threshold to account for parlay variance.
             if is_bundle and kalshi_yes_price > 0:
                 bundle_legs = parse_bundle_legs(market.get("title", ""))
                 n_legs = max(len(bundle_legs), 1)
@@ -212,7 +208,6 @@ def execute_for_sport(
                 effective_model_prob = final_prob
                 effective_min_edge = eff_min_edge
 
-            # Kelly sizing
             kelly_result = compute_kelly_bet(
                 model_prob=effective_model_prob,
                 kalshi_yes_price=kalshi_yes_price,
@@ -226,7 +221,7 @@ def execute_for_sport(
                 "skip"
             )
             edge = kelly_result["edge"]
-            print(f"  {home_team} vs {away_team}: model={final_prob:.3f} kalshi={kalshi_implied:.2f} edge={edge:+.3f} → {decision} ({kelly_result['reason']})")
+            print(f"  {home_team} vs {away_team}: {signal_source} kalshi={kalshi_implied:.2f} edge={edge:+.3f} → {decision} ({kelly_result['reason']})")
 
             pred_id = log_prediction(
                 sport=sport, game_id=game_id,
@@ -242,7 +237,6 @@ def execute_for_sport(
                 summary["bets_skipped"] += 1
                 continue
 
-            # Place trade
             side = kelly_result["side"]
             bet_size = kelly_result["bet_size_usd"]
             n_contracts = usd_to_contracts(bet_size, kalshi_yes_price if side == "yes" else 100 - kalshi_yes_price)
@@ -264,6 +258,7 @@ def execute_for_sport(
                     status="open",
                 )
                 summary["bets_placed"] += 1
+                bankroll -= bet_size  # track running balance for Kelly sizing
             else:
                 summary["bets_skipped"] += 1
 
