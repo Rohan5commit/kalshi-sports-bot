@@ -94,7 +94,22 @@ def _authed_request(method: str, endpoint: str, **kwargs) -> Optional[dict]:
         try:
             headers = _make_rsa_headers(method, endpoint)
             resp = requests.request(method, url, headers=headers, timeout=20, **kwargs)
-            resp.raise_for_status()
+            if not resp.ok:
+                body = resp.text[:2000]
+                print(f"[kalshi] {method} {endpoint} → HTTP {resp.status_code}: {body}")
+                err_msg = f"HTTP {resp.status_code}: {body}"
+                if resp.status_code < 500:
+                    # Client error — don't retry, bad request won't fix itself
+                    log_error(
+                        context=f"kalshi_client._authed_request {method} {endpoint}",
+                        error_msg=err_msg,
+                        tb="",
+                    )
+                    return None
+                last_exc = Exception(err_msg)
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(BACKOFF_BASE ** attempt)
+                continue
             return resp.json()
         except Exception as exc:
             last_exc = exc
