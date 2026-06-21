@@ -4,6 +4,7 @@ Market data endpoints are public (no auth).
 Trading endpoints require KALSHI_API_KEY from Modal Secrets.
 """
 import os
+import re
 import time
 import traceback
 import requests
@@ -13,6 +14,20 @@ from config import KALSHI_DEMO_BASE, KALSHI_PROD_BASE, KALSHI_USE_DEMO, MAX_RETR
 from db.supabase_client import log_error
 
 BASE_URL = KALSHI_DEMO_BASE if KALSHI_USE_DEMO else KALSHI_PROD_BASE
+
+# Kalshi event series tickers for each sport's individual game markets
+_GAME_SERIES: dict = {
+    "mlb": "KXMLBGAME",
+    "nba": "KXNBAGAME",
+    "nfl": "KXNFLGAME",
+}
+
+# Fallback keyword terms for older-style individual markets (title-based search)
+_SPORT_KALSHI_TERMS: dict = {
+    "mlb": ["baseball", "mlb"],
+    "nba": ["basketball", "nba"],
+    "nfl": ["american football", "football", "nfl"],
+}
 
 
 def _public_request(method: str, endpoint: str, **kwargs) -> Optional[dict]:
@@ -96,7 +111,7 @@ def _authed_request(method: str, endpoint: str, **kwargs) -> Optional[dict]:
 # ── Public market data ─────────────────────────────────────────────────────────
 
 def get_markets(status: str = "open", limit: int = 1000) -> list:
-    """Fetch open sports markets."""
+    """Fetch open sports markets (bundle/cross-category format)."""
     data = _public_request("GET", "/markets", params={"status": status, "category": "sports", "limit": limit})
     return (data or {}).get("markets", [])
 
@@ -113,16 +128,17 @@ def get_market_orderbook(market_ticker: str) -> Optional[dict]:
 
 
 def get_yes_price_cents(market: dict) -> int:
-    """Return the yes ask price in integer cents (1-99), trying all known field formats."""
-    # New bundle format: yes_ask_dollars (string USD, e.g. "0.1500")
-    dollars = market.get("yes_ask_dollars") or market.get("last_price_dollars")
-    if dollars:
-        try:
-            cents = round(float(dollars) * 100)
-            if 1 <= cents <= 99:
-                return cents
-        except (ValueError, TypeError):
-            pass
+    """Return the yes ask price in integer cents (1-99), handling all known field formats."""
+    # Current format: yes_ask_dollars (string USD, e.g. "0.5600")
+    for key in ("yes_ask_dollars", "last_price_dollars"):
+        val = market.get(key)
+        if val:
+            try:
+                cents = round(float(val) * 100)
+                if 1 <= cents <= 99:
+                    return cents
+            except (ValueError, TypeError):
+                pass
     # Legacy format: yes_ask or yes_price (integer cents)
     for key in ("yes_ask", "yes_price"):
         val = market.get(key)
@@ -153,15 +169,8 @@ def parse_bundle_legs(title: str) -> list:
     return legs
 
 
-_SPORT_KALSHI_TERMS: dict = {
-    "mlb": ["baseball", "mlb"],
-    "nba": ["basketball", "nba"],
-    "nfl": ["american football", "football", "nfl"],
-}
-
-
 def _city_tokens(team_name: str) -> list:
-    """Multi-word city prefix of a team name for bundle leg matching (min 5 chars per token)."""
+    """Multi-word city prefix of a team name for fuzzy matching."""
     words = team_name.lower().split()
     tokens = []
     if len(words) >= 2:
@@ -171,33 +180,107 @@ def _city_tokens(team_name: str) -> list:
     return tokens
 
 
-def search_sports_markets(home_team: str, away_team: str, sport: str) -> list:
-    """Search open sports markets for a specific game matchup.
+def _get_game_events(sport: str) -> list:
+    """Fetch all open game events for a sport from Kalshi's dedicated game series."""
+    series = _GAME_SERIES.get(sport.lower())
+    if not series:
+        return []
+    data = _public_request("GET", "/events", params={
+        "status": "open", "series_ticker": series, "limit": 100,
+    })
+    return (data or {}).get("events", [])
 
-    Priority:
-    1. Individual game markets (title contains team name + sport keyword).
-    2. Multi-game bundle markets where one leg matches our team (Kalshi's current format).
-       Bundle markets are flagged with _is_bundle=True for downstream handling.
+
+def _get_event_markets(event_ticker: str) -> list:
+    """Fetch all markets within a specific game event."""
+    data = _public_request("GET", "/markets", params={
+        "event_ticker": event_ticker, "limit": 10,
+    })
+    return (data or {}).get("markets", [])
+
+
+def _home_market_from_event(event_ticker: str, markets: list) -> Optional[dict]:
     """
-    all_markets = get_markets(limit=1000)
+    Return the market where yes = home team wins.
+    Convention: event ticker ends with {AWAY_CODE}{HOME_CODE}.
+    The home market's ticker suffix equals HOME_CODE (the trailing part of teams_code).
+    e.g. KXMLBGAME-26JUN232145ATHSF → teams_code=ATHSF → home suffix=SF.
+    """
+    # Extract the teams_code by stripping the date+time prefix from the last segment
+    seg = event_ticker.split("-")[-1]
+    teams_code = re.sub(r'^\d{2}\w{3}\d{2}(?:\d{4})?', '', seg)
+    if not teams_code:
+        return markets[0] if markets else None
+    for m in markets:
+        suffix = (m.get("ticker") or "").split("-")[-1]
+        if suffix and teams_code.endswith(suffix):
+            return m
+    return markets[0] if markets else None
+
+
+def _event_matches_game(event: dict, home_tokens: list, away_tokens: list,
+                         home_lower: str, away_lower: str) -> bool:
+    """
+    Check whether a Kalshi event corresponds to our home vs away game.
+    Event title format: "Away vs Home".
+    """
+    title = (event.get("title") or "").lower()
+    sides = [s.strip() for s in title.split(" vs ")]
+    if len(sides) < 2:
+        return False
+    away_side, home_side = sides[0], sides[-1]
+
+    home_match = (
+        any(t in home_side for t in home_tokens) or
+        home_lower in home_side or
+        any(w in home_lower for w in home_side.split() if len(w) >= 4)
+    )
+    away_match = (
+        any(t in away_side for t in away_tokens) or
+        away_lower in away_side or
+        any(w in away_lower for w in away_side.split() if len(w) >= 4)
+    )
+    return home_match or away_match
+
+
+def search_sports_markets(home_team: str, away_team: str, sport: str) -> list:
+    """
+    Find the Kalshi market(s) for a specific game.
+
+    Search order:
+    1. Dedicated game event series (KXMLBGAME / KXNBAGAME / KXNFLGAME) — returns the
+       home-team-wins market so final_prob (P(home wins)) maps directly to yes_price.
+    2. Individual title-based markets (older Kalshi format, unlikely but kept as fallback).
+    3. Multi-game bundle/parlay markets (current Kalshi default for non-game content).
+    """
     home_lower = home_team.lower()
     away_lower = away_team.lower()
-    sport_terms = _SPORT_KALSHI_TERMS.get(sport.lower(), [sport.lower()])
+    home_tokens = _city_tokens(home_team)
+    away_tokens = _city_tokens(away_team)
 
-    # Primary: individual game markets
+    # ── Priority 1: dedicated game event series ────────────────────────────────
+    events = _get_game_events(sport)
+    for event in events:
+        if _event_matches_game(event, home_tokens, away_tokens, home_lower, away_lower):
+            event_ticker = event.get("event_ticker", "")
+            markets = _get_event_markets(event_ticker)
+            home_market = _home_market_from_event(event_ticker, markets)
+            if home_market:
+                print(f"[kalshi] matched game event {event_ticker} → {home_market.get('ticker')}")
+                return [home_market]
+
+    # ── Priority 2: individual title-based markets ─────────────────────────────
+    all_markets = get_markets(limit=1000)
+    sport_terms = _SPORT_KALSHI_TERMS.get(sport.lower(), [sport.lower()])
     individual = []
     for market in all_markets:
         combined = ((market.get("title") or "") + " " + (market.get("subtitle") or "")).lower()
-        team_match = home_lower in combined or away_lower in combined
-        sport_match = any(t in combined for t in sport_terms)
-        if team_match and sport_match:
+        if (home_lower in combined or away_lower in combined) and any(t in combined for t in sport_terms):
             individual.append(market)
     if individual:
         return individual
 
-    # Fallback: bundle/parlay markets containing our team as a leg
-    home_tokens = _city_tokens(home_team)
-    away_tokens = _city_tokens(away_team)
+    # ── Priority 3: bundle/parlay markets ─────────────────────────────────────
     bundle_matches = []
     for market in all_markets:
         ticker = market.get("ticker", "")
@@ -233,7 +316,7 @@ def place_order(
     price: int,
     order_type: str = "limit",
 ) -> Optional[dict]:
-    """Place a limit order on Kalshi demo. price in cents (1-99)."""
+    """Place a limit order on Kalshi. price in cents (1-99)."""
     payload = {
         "ticker": market_ticker,
         "action": "buy",
