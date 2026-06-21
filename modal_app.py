@@ -574,13 +574,13 @@ def test_kalshi_auth():
             ticker = mkts[0].get("ticker")
             yes_ask = float(mkts[0].get("yes_ask_dollars") or 0.5)
             print(f"[test] Placing test order: ticker={ticker} yes_price={yes_ask}")
-            result = _authed_request("POST", "/portfolio/orders", json={
+            result = _authed_request("POST", "/portfolio/events/orders", json={
                 "ticker": ticker,
-                "action": "buy",
-                "side": "yes",
-                "type": "limit",
-                "count": 1,
-                "yes_price": yes_ask,
+                "side": "bid",
+                "count": "1",
+                "price": str(round(yes_ask, 4)),
+                "time_in_force": "good_till_canceled",
+                "self_trade_prevention_type": "taker_at_cross",
             })
             print(f"[test] Order result: {result}")
         else:
