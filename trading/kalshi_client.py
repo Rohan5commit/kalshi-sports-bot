@@ -187,13 +187,16 @@ def parse_bundle_legs(title: str) -> list:
 
 
 def _city_tokens(team_name: str) -> list:
-    """Multi-word city prefix of a team name for fuzzy matching."""
+    """Tokens for fuzzy matching: city prefix + team nickname (last word)."""
     words = team_name.lower().split()
     tokens = []
     if len(words) >= 2:
         tokens.append(f"{words[0]} {words[1]}")
     if words and len(words[0]) >= 5:
         tokens.append(words[0])
+    # Add team nickname (last word) — distinguishes "Dodgers" from "Angels"
+    if words and len(words[-1]) >= 4 and words[-1] not in tokens:
+        tokens.append(words[-1])
     return tokens
 
 
@@ -253,7 +256,7 @@ def _abbr_variants(abbr: str) -> list:
         "KCR": "KC",  "KC":  "KCR",
         "TBR": "TB",  "TB":  "TBR",
         "SFG": "SF",  "SF":  "SFG",
-        "LAD": "LA",  "LA":  "LAD",
+        # LAD=Dodgers, LAA=Angels — Kalshi uses LAD/LAA directly, no alias needed
         "LAA": "ANA", "ANA": "LAA",
     }
     if abbr in _MAP:
