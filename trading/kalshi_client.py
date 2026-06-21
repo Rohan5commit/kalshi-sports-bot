@@ -112,13 +112,33 @@ def get_market_orderbook(market_ticker: str) -> Optional[dict]:
     return _public_request("GET", f"/markets/{market_ticker}/orderbook")
 
 
+def get_yes_price_cents(market: dict) -> int:
+    """Return the yes ask price in integer cents (1-99), trying all known field formats."""
+    # New bundle format: yes_ask_dollars (string USD, e.g. "0.1500")
+    dollars = market.get("yes_ask_dollars") or market.get("last_price_dollars")
+    if dollars:
+        try:
+            cents = round(float(dollars) * 100)
+            if 1 <= cents <= 99:
+                return cents
+        except (ValueError, TypeError):
+            pass
+    # Legacy format: yes_ask or yes_price (integer cents)
+    for key in ("yes_ask", "yes_price"):
+        val = market.get(key)
+        if val:
+            try:
+                cents = int(val)
+                if 1 <= cents <= 99:
+                    return cents
+            except (ValueError, TypeError):
+                pass
+    return 50
+
+
 def get_implied_probability(market: dict) -> float:
-    """
-    Implied probability from Kalshi yes_ask price.
-    yes_ask is the price to buy Yes, in cents (0-100).
-    """
-    yes_ask = market.get("yes_ask") or market.get("yes_price") or 50
-    return float(yes_ask) / 100.0
+    """Implied probability from the yes ask price."""
+    return get_yes_price_cents(market) / 100.0
 
 
 def parse_bundle_legs(title: str) -> list:
@@ -133,15 +153,22 @@ def parse_bundle_legs(title: str) -> list:
     return legs
 
 
+_SPORT_KALSHI_TERMS: dict = {
+    "mlb": ["baseball", "mlb"],
+    "nba": ["basketball", "nba"],
+    "nfl": ["american football", "football", "nfl"],
+}
+
+
 def _city_tokens(team_name: str) -> list:
-    """First 1-2 words of a team name used to match city in bundle leg descriptions."""
+    """Multi-word city prefix of a team name for bundle leg matching (min 5 chars per token)."""
     words = team_name.lower().split()
     tokens = []
     if len(words) >= 2:
         tokens.append(f"{words[0]} {words[1]}")
-    if words:
+    if words and len(words[0]) >= 5:
         tokens.append(words[0])
-    return [t for t in tokens if len(t) >= 3]
+    return tokens
 
 
 def search_sports_markets(home_team: str, away_team: str, sport: str) -> list:
@@ -155,13 +182,15 @@ def search_sports_markets(home_team: str, away_team: str, sport: str) -> list:
     all_markets = get_markets(limit=1000)
     home_lower = home_team.lower()
     away_lower = away_team.lower()
-    sport_lower = sport.lower()
+    sport_terms = _SPORT_KALSHI_TERMS.get(sport.lower(), [sport.lower()])
 
     # Primary: individual game markets
     individual = []
     for market in all_markets:
         combined = ((market.get("title") or "") + " " + (market.get("subtitle") or "")).lower()
-        if (home_lower in combined or away_lower in combined) and sport_lower in combined:
+        team_match = home_lower in combined or away_lower in combined
+        sport_match = any(t in combined for t in sport_terms)
+        if team_match and sport_match:
             individual.append(market)
     if individual:
         return individual
