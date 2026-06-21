@@ -389,23 +389,26 @@ def place_order(
     price: int,
     order_type: str = "limit",
 ) -> Optional[dict]:
-    """Place a limit order on Kalshi.
-    price is in cents (1-99) internally; converted to dollar float (0.01-0.99) for API.
+    """Place a limit order on Kalshi v2 API.
+    side: "yes" or "no" (internally). "yes" → bid, "no" → ask at (1-price).
+    price: cents (1-99) internally; converted to dollar string for API.
     """
-    yes_price_dollars = round((price if side == "yes" else 100 - price) / 100.0, 4)
+    # v2 API: side=bid means buy YES; side=ask means sell YES (≡ buy NO)
+    api_side = "bid" if side == "yes" else "ask"
+    yes_price_dollars = str(round((price if side == "yes" else 100 - price) / 100.0, 4))
     payload = {
         "ticker": market_ticker,
-        "action": "buy",
-        "side": side,
-        "type": order_type,
-        "count": count,
-        "yes_price": yes_price_dollars,
+        "side": api_side,
+        "count": str(count),
+        "price": yes_price_dollars,
+        "time_in_force": "good_till_canceled",
+        "self_trade_prevention_type": "taker_at_cross",
     }
-    result = _authed_request("POST", "/portfolio/orders", json=payload)
+    result = _authed_request("POST", "/portfolio/events/orders", json=payload)
     if result is None:
         log_error(
             context=f"kalshi_client.place_order({market_ticker}, {side})",
-            error_msg="Kalshi API returned None — order not placed",
+            error_msg="Kalshi v2 API returned None — order not placed",
             tb="",
         )
     return result
