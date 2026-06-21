@@ -27,10 +27,41 @@ def _get(url: str, params: dict = None) -> dict:
     raise last_exc
 
 
+def _american_to_prob(odds_str: str) -> Optional[float]:
+    """Convert American moneyline string (e.g. '-118', '+130') to raw implied probability."""
+    try:
+        o = float(str(odds_str).replace("+", ""))
+        if o < 0:
+            return (-o) / (-o + 100)
+        else:
+            return 100 / (o + 100)
+    except (ValueError, TypeError):
+        return None
+
+
+def _extract_moneyline(competition: dict) -> Optional[float]:
+    """
+    Extract vig-removed home win probability from ESPN DraftKings moneyline.
+    Returns float (0-1) or None if odds unavailable.
+    """
+    odds_list = competition.get("odds", [])
+    for odds_entry in odds_list:
+        ml = odds_entry.get("moneyline", {})
+        home_odds_str = (ml.get("home", {}).get("close", {}) or ml.get("home", {}).get("open", {})).get("odds")
+        away_odds_str = (ml.get("away", {}).get("close", {}) or ml.get("away", {}).get("open", {})).get("odds")
+        if home_odds_str and away_odds_str:
+            home_raw = _american_to_prob(home_odds_str)
+            away_raw = _american_to_prob(away_odds_str)
+            if home_raw and away_raw:
+                total = home_raw + away_raw
+                return round(home_raw / total, 4)
+    return None
+
+
 def get_scoreboard(sport: str, game_date: Optional[date] = None) -> list:
     """
     Fetch today's (or a specific date's) scoreboard for sport.
-    Returns list of game dicts with keys: id, home, away, status, home_score, away_score.
+    Returns list of game dicts including vegas_home_prob from DraftKings moneylines.
     """
     sport_path = ESPN_SPORT_PATHS.get(sport)
     if not sport_path:
@@ -51,6 +82,7 @@ def get_scoreboard(sport: str, game_date: Optional[date] = None) -> list:
             away = next((c for c in competitors if c.get("homeAway") == "away"), {})
 
             status_type = event.get("status", {}).get("type", {})
+            vegas_prob = _extract_moneyline(competition)
             games.append({
                 "id": event.get("id"),
                 "name": event.get("name", ""),
@@ -67,6 +99,7 @@ def get_scoreboard(sport: str, game_date: Optional[date] = None) -> list:
                 "away_id": away.get("team", {}).get("id", ""),
                 "away_score": int(away.get("score", 0) or 0),
                 "home_winner": home.get("winner", False),
+                "vegas_home_prob": vegas_prob,
             })
         return games
     except Exception as exc:
