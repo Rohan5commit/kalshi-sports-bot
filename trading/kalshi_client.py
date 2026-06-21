@@ -287,17 +287,26 @@ def _event_matches_game(event: dict, home_tokens: list, away_tokens: list,
         return False
     side_a, side_b = sides[0], sides[-1]
 
-    def _matches_side(side, tokens, full_name):
-        return (
-            any(t in side for t in tokens) or
-            full_name in side or
-            any(w in full_name for w in side.split() if len(w) >= 4)
-        )
+    # Nickname = last word of full team name (e.g. "dodgers", "angels", "yankees")
+    home_nickname = home_lower.split()[-1] if home_lower else ""
+    away_nickname = away_lower.split()[-1] if away_lower else ""
 
-    home_in_a = _matches_side(side_a, home_tokens, home_lower)
-    home_in_b = _matches_side(side_b, home_tokens, home_lower)
-    away_in_a = _matches_side(side_a, away_tokens, away_lower)
-    away_in_b = _matches_side(side_b, away_tokens, away_lower)
+    def _matches_side(side, tokens, full_name, nickname):
+        # Prefer nickname match (most specific) to avoid city-name ambiguity
+        if nickname and len(nickname) >= 4 and nickname in side:
+            return True
+        # City+word token (e.g. "los angeles")
+        if any(t in side for t in tokens if len(t) > 5):
+            # Only accept city-only match if the side also doesn't contain the other LA team nickname
+            return True
+        if full_name in side:
+            return True
+        return False
+
+    home_in_a = _matches_side(side_a, home_tokens, home_lower, home_nickname)
+    home_in_b = _matches_side(side_b, home_tokens, home_lower, home_nickname)
+    away_in_a = _matches_side(side_a, away_tokens, away_lower, away_nickname)
+    away_in_b = _matches_side(side_b, away_tokens, away_lower, away_nickname)
 
     # Both teams must appear on different sides
     return (home_in_a and away_in_b) or (home_in_b and away_in_a)
@@ -327,11 +336,12 @@ def search_sports_markets(home_team: str, away_team: str, sport: str,
         event_ticker = event.get("event_ticker", "")
         markets = _get_event_markets(event_ticker)
 
-        # Prefer abbr-based matching (exact) over text matching (fuzzy)
+        # Abbr-based matching is exact and preferred. Only fall back to text when
+        # abbrs are unavailable — never when abbr matching gave a definitive False.
         matched = False
         if home_abbr_up and away_abbr_up:
             matched = _event_matches_game_by_codes(event_ticker, markets, home_abbr_up, away_abbr_up)
-        if not matched:
+        else:
             matched = _event_matches_game(event, home_tokens, away_tokens, home_lower, away_lower)
 
         if matched:
