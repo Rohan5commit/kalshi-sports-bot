@@ -543,23 +543,28 @@ def purge_bad_trades():
     """Delete trades and predictions logged on 2026-06-21 before Vegas signal was wired up.
     Those were placed with untrained ML (model=0.297 for everything) — pure noise, not real signal.
     Run once then this function can be removed."""
-    from db.supabase_client import get_client
-    sb = get_client()
+    from db.supabase_client import _get_client
+    sb = _get_client()
 
-    # Delete trades placed on 2026-06-21
-    trades_resp = sb.table("trades").delete().eq("status", "open").execute()
-    print(f"[purge] Deleted trades: {trades_resp}")
+    # Show what's there first
+    trades = sb.table("trades").select("id,game_date,status,created_at").execute()
+    print(f"[purge] All trades ({len(trades.data)}): {trades.data}")
 
-    # Delete predictions logged on 2026-06-21 with decision='bet'
-    preds_resp = sb.table("predictions").delete().eq("game_date", "2026-06-21").eq("decision", "bet").execute()
-    print(f"[purge] Deleted predictions: {preds_resp}")
+    preds = sb.table("predictions").select("id,game_date,decision").eq("game_date", "2026-06-21").execute()
+    print(f"[purge] 2026-06-21 predictions ({len(preds.data)}): {[p['decision'] for p in preds.data]}")
 
-    # Check remaining
-    remaining = sb.table("trades").select("id", count="exact").execute()
-    print(f"[purge] Remaining trades in DB: {remaining.count}")
+    # Delete all open trades (all from 2026-06-21 ML run — none should exist from valid runs yet)
+    trades_del = sb.table("trades").delete().eq("status", "open").execute()
+    print(f"[purge] Deleted open trades: {len(trades_del.data)}")
 
+    # Delete predictions from 2026-06-21 with decision='bet' (the bad ML ones)
+    preds_del = sb.table("predictions").delete().eq("game_date", "2026-06-21").eq("decision", "bet").execute()
+    print(f"[purge] Deleted bad predictions: {len(preds_del.data)}")
+
+    # Confirm clean
+    remaining_trades = sb.table("trades").select("id", count="exact").execute()
     remaining_preds = sb.table("predictions").select("id", count="exact").execute()
-    print(f"[purge] Remaining predictions in DB: {remaining_preds.count}")
+    print(f"[purge] Done — trades remaining: {remaining_trades.count}, predictions remaining: {remaining_preds.count}")
 
 
 # ── Quick auth test (dev-only, not scheduled) ──────────────────────────────────
