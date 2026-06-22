@@ -546,25 +546,21 @@ def purge_bad_trades():
     from db.supabase_client import _get_client
     sb = _get_client()
 
-    # Show what's there first
-    trades = sb.table("trades").select("id,game_date,status,created_at").execute()
-    print(f"[purge] All trades ({len(trades.data)}): {trades.data}")
+    # Inspect schema first
+    sample_trade = sb.table("trades").select("*").limit(1).execute()
+    print(f"[purge] Trade columns: {list(sample_trade.data[0].keys()) if sample_trade.data else 'empty'}")
 
-    preds = sb.table("predictions").select("id,game_date,decision").eq("game_date", "2026-06-21").execute()
-    print(f"[purge] 2026-06-21 predictions ({len(preds.data)}): {[p['decision'] for p in preds.data]}")
+    sample_pred = sb.table("predictions").select("*").limit(1).execute()
+    print(f"[purge] Prediction columns: {list(sample_pred.data[0].keys()) if sample_pred.data else 'empty'}")
 
-    # Delete all open trades (all from 2026-06-21 ML run — none should exist from valid runs yet)
-    trades_del = sb.table("trades").delete().eq("status", "open").execute()
-    print(f"[purge] Deleted open trades: {len(trades_del.data)}")
+    # Count everything
+    all_trades = sb.table("trades").select("*").execute()
+    print(f"[purge] Total trades: {len(all_trades.data)}")
+    for t in all_trades.data:
+        print(f"  trade: {t}")
 
-    # Delete predictions from 2026-06-21 with decision='bet' (the bad ML ones)
-    preds_del = sb.table("predictions").delete().eq("game_date", "2026-06-21").eq("decision", "bet").execute()
-    print(f"[purge] Deleted bad predictions: {len(preds_del.data)}")
-
-    # Confirm clean
-    remaining_trades = sb.table("trades").select("id", count="exact").execute()
-    remaining_preds = sb.table("predictions").select("id", count="exact").execute()
-    print(f"[purge] Done — trades remaining: {remaining_trades.count}, predictions remaining: {remaining_preds.count}")
+    all_preds = sb.table("predictions").select("*").execute()
+    print(f"[purge] Total predictions: {len(all_preds.data)}")
 
 
 # ── Quick auth test (dev-only, not scheduled) ──────────────────────────────────
