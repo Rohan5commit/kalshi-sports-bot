@@ -536,30 +536,6 @@ def run_market_retrain():
     print("\n=== run_market_retrain complete ===")
 
 
-# ── One-shot cleanup of bad trades from broken ML signal (2026-06-21) ──────────
-
-@app.function(image=image, secrets=secrets, timeout=60)
-def purge_bad_trades():
-    """Delete trades and predictions logged on 2026-06-21 before Vegas signal was wired up.
-    Those were placed with untrained ML (model=0.297 for everything) — pure noise, not real signal.
-    Run once then this function can be removed."""
-    from db.supabase_client import _get_client
-    sb = _get_client()
-
-    # Delete all trades (all are from 2026-06-21 bad ML run)
-    trades_del = sb.table("trades").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
-    print(f"[purge] Deleted trades: {len(trades_del.data)}")
-
-    # Delete predictions from 2026-06-21 with decision='bet'
-    preds_del = sb.table("predictions").delete().eq("game_date", "2026-06-21").eq("decision", "bet").execute()
-    print(f"[purge] Deleted bad predictions: {len(preds_del.data)}")
-
-    # Confirm
-    remaining_trades = sb.table("trades").select("id", count="exact").execute()
-    remaining_preds = sb.table("predictions").select("id", count="exact").execute()
-    print(f"[purge] Done — trades remaining: {remaining_trades.count}, predictions remaining: {remaining_preds.count}")
-
-
 # ── Quick auth test (dev-only, not scheduled) ──────────────────────────────────
 
 @app.function(image=image, secrets=secrets, timeout=60)
