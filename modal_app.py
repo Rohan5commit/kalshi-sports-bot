@@ -546,21 +546,18 @@ def purge_bad_trades():
     from db.supabase_client import _get_client
     sb = _get_client()
 
-    # Inspect schema first
-    sample_trade = sb.table("trades").select("*").limit(1).execute()
-    print(f"[purge] Trade columns: {list(sample_trade.data[0].keys()) if sample_trade.data else 'empty'}")
+    # Delete all trades (all are from 2026-06-21 bad ML run)
+    trades_del = sb.table("trades").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
+    print(f"[purge] Deleted trades: {len(trades_del.data)}")
 
-    sample_pred = sb.table("predictions").select("*").limit(1).execute()
-    print(f"[purge] Prediction columns: {list(sample_pred.data[0].keys()) if sample_pred.data else 'empty'}")
+    # Delete predictions from 2026-06-21 with decision='bet'
+    preds_del = sb.table("predictions").delete().eq("game_date", "2026-06-21").eq("decision", "bet").execute()
+    print(f"[purge] Deleted bad predictions: {len(preds_del.data)}")
 
-    # Count everything
-    all_trades = sb.table("trades").select("*").execute()
-    print(f"[purge] Total trades: {len(all_trades.data)}")
-    for t in all_trades.data:
-        print(f"  trade: {t}")
-
-    all_preds = sb.table("predictions").select("*").execute()
-    print(f"[purge] Total predictions: {len(all_preds.data)}")
+    # Confirm
+    remaining_trades = sb.table("trades").select("id", count="exact").execute()
+    remaining_preds = sb.table("predictions").select("id", count="exact").execute()
+    print(f"[purge] Done — trades remaining: {remaining_trades.count}, predictions remaining: {remaining_preds.count}")
 
 
 # ── Quick auth test (dev-only, not scheduled) ──────────────────────────────────
