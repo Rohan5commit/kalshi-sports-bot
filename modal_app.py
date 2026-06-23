@@ -268,10 +268,11 @@ def _enrich_weather(sport: str, game_logs: list) -> list:
 
 def reconcile_open_trades():
     """
-    For each open trade in Supabase, fetch the Kalshi market status.
-    If the market is settled, mark the trade won or lost based on our side vs result.
+    For each open trade in Supabase:
+    - If market settled: mark won or lost based on result vs side
+    - If market active but we hold no position: order never filled, mark canceled
     """
-    from trading.kalshi_client import _authed_request
+    from trading.kalshi_client import _authed_request, get_open_positions
     from db.supabase_client import get_open_trades, update_trade_status
 
     open_trades = get_open_trades()
@@ -279,11 +280,15 @@ def reconcile_open_trades():
         print("[reconcile] No open trades to reconcile")
         return
 
-    print(f"[reconcile] Checking {len(open_trades)} open trade(s)...")
+    # Build set of market tickers where we actually hold a position
+    positions = get_open_positions()
+    held_tickers = {p.get("market_id", p.get("ticker", "")) for p in positions}
+
+    print(f"[reconcile] Checking {len(open_trades)} open trade(s), {len(held_tickers)} held position(s)...")
     for trade in open_trades:
         trade_id = trade.get("id")
         market_id = trade.get("kalshi_market_id", "")
-        side = trade.get("side", "yes")  # "yes" = bet home wins
+        side = trade.get("side", "yes")
         if not market_id:
             continue
 
@@ -295,21 +300,19 @@ def reconcile_open_trades():
 
             market = market_data.get("market", market_data)
             status = market.get("status", "")
-            result = market.get("result", "")  # "yes" or "no"
+            result = market.get("result", "")
 
-            if status not in ("settled", "closed"):
-                print(f"[reconcile] {market_id}: still {status} — keeping open")
-                continue
-
-            if not result:
-                print(f"[reconcile] {market_id}: settled but no result yet — keeping open")
-                continue
-
-            # "yes" side wins if result=="yes", "no" side wins if result=="no"
-            won = (side == "yes" and result == "yes") or (side == "no" and result == "no")
-            new_status = "won" if won else "lost"
-            update_trade_status(trade_id, new_status)
-            print(f"[reconcile] {market_id}: result={result} side={side} -> {new_status}")
+            if status in ("settled", "closed") and result:
+                won = (side == "yes" and result == "yes") or (side == "no" and result == "no")
+                new_status = "won" if won else "lost"
+                update_trade_status(trade_id, new_status)
+                print(f"[reconcile] {market_id}: result={result} side={side} -> {new_status}")
+            elif status == "active" and market_id not in held_tickers:
+                # Order was placed but never filled (limit order not matched)
+                update_trade_status(trade_id, "canceled")
+                print(f"[reconcile] {market_id}: active but no position held -> canceled")
+            else:
+                print(f"[reconcile] {market_id}: status={status} held={market_id in held_tickers} — keeping open")
 
         except Exception as exc:
             print(f"[reconcile] {market_id}: error — {exc}")
