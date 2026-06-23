@@ -264,6 +264,57 @@ def _enrich_weather(sport: str, game_logs: list) -> list:
     return game_logs
 
 
+# ── Trade reconciliation ───────────────────────────────────────────────────────
+
+def reconcile_open_trades():
+    """
+    For each open trade in Supabase, fetch the Kalshi market status.
+    If the market is settled, mark the trade won or lost based on our side vs result.
+    """
+    from trading.kalshi_client import _authed_request
+    from db.supabase_client import get_open_trades, update_trade_status
+
+    open_trades = get_open_trades()
+    if not open_trades:
+        print("[reconcile] No open trades to reconcile")
+        return
+
+    print(f"[reconcile] Checking {len(open_trades)} open trade(s)...")
+    for trade in open_trades:
+        trade_id = trade.get("id")
+        market_id = trade.get("kalshi_market_id", "")
+        side = trade.get("side", "yes")  # "yes" = bet home wins
+        if not market_id:
+            continue
+
+        try:
+            market_data = _authed_request("GET", f"/markets/{market_id}")
+            if market_data is None:
+                print(f"[reconcile] {market_id}: could not fetch — skipping")
+                continue
+
+            market = market_data.get("market", market_data)
+            status = market.get("status", "")
+            result = market.get("result", "")  # "yes" or "no"
+
+            if status not in ("settled", "closed"):
+                print(f"[reconcile] {market_id}: still {status} — keeping open")
+                continue
+
+            if not result:
+                print(f"[reconcile] {market_id}: settled but no result yet — keeping open")
+                continue
+
+            # "yes" side wins if result=="yes", "no" side wins if result=="no"
+            won = (side == "yes" and result == "yes") or (side == "no" and result == "no")
+            new_status = "won" if won else "lost"
+            update_trade_status(trade_id, new_status)
+            print(f"[reconcile] {market_id}: result={result} side={side} -> {new_status}")
+
+        except Exception as exc:
+            print(f"[reconcile] {market_id}: error — {exc}")
+
+
 # ── 1. Morning pipeline ────────────────────────────────────────────────────────
 
 @app.function(
@@ -278,6 +329,13 @@ def morning_pipeline():
     from data.scrapers.espn import get_scoreboard
     from trading.executor import execute_for_sport
     from db.supabase_client import log_error
+
+    # Reconcile any open trades from previous days before placing new ones
+    try:
+        reconcile_open_trades()
+    except Exception as exc:
+        log_error(context="morning_pipeline.reconcile", error_msg=str(exc),
+                  tb=traceback.format_exc(), run_date=run_date)
 
     for sport in SPORTS:
         try:
@@ -350,7 +408,6 @@ def nightly_retrain():
 
             since_date = run_date - timedelta(days=ROLLING_ACCURACY_WINDOW)
             history = get_resolved_games_since(sport, since_date)
-            # Build outcome map from actual game logs (home_win truth)
             all_logs_recent = [
                 g for g in get_game_logs(sport)
                 if g.get("game_date", "") >= str(since_date)
@@ -400,6 +457,14 @@ def send_daily_email():
     print(f"=== send_daily_email {run_date} ===")
     from reporting.email_report import send_daily_report
     from db.supabase_client import log_error
+
+    # Reconcile before building report so P&L reflects settled trades
+    try:
+        reconcile_open_trades()
+    except Exception as exc:
+        log_error(context="send_daily_email.reconcile", error_msg=str(exc),
+                  tb=traceback.format_exc(), run_date=run_date)
+
     try:
         send_daily_report(run_date)
         print("Email sent")
@@ -645,4 +710,3 @@ def initial_setup():
 @app.local_entrypoint()
 def main():
     print("Kalshi Sports Bot — run initial_setup once, then scheduled jobs take over")
-
