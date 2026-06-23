@@ -280,11 +280,15 @@ def reconcile_open_trades():
         print("[reconcile] No open trades to reconcile")
         return
 
-    # Build set of market tickers where we actually hold a position
+    # Build map of market ticker -> contracts held (position_fp > 0 means filled)
     positions = get_open_positions()
-    held_tickers = {p.get("market_id", p.get("ticker", "")) for p in positions}
+    held_tickers = {
+        p.get("market_id", p.get("ticker", ""))
+        for p in positions
+        if float(p.get("position_fp", 0) or 0) != 0
+    }
 
-    print(f"[reconcile] Checking {len(open_trades)} open trade(s), {len(held_tickers)} held position(s)...")
+    print(f"[reconcile] Checking {len(open_trades)} open trade(s), {len(held_tickers)} filled position(s)...")
     for trade in open_trades:
         trade_id = trade.get("id")
         market_id = trade.get("kalshi_market_id", "")
@@ -308,11 +312,11 @@ def reconcile_open_trades():
                 update_trade_status(trade_id, new_status)
                 print(f"[reconcile] {market_id}: result={result} side={side} -> {new_status}")
             elif status == "active" and market_id not in held_tickers:
-                # Order was placed but never filled (limit order not matched)
+                # Order placed but position_fp==0 — order never filled
                 update_trade_status(trade_id, "canceled")
-                print(f"[reconcile] {market_id}: active but no position held -> canceled")
+                print(f"[reconcile] {market_id}: active, no contracts filled -> canceled")
             else:
-                print(f"[reconcile] {market_id}: status={status} held={market_id in held_tickers} — keeping open")
+                print(f"[reconcile] {market_id}: status={status} contracts_held={market_id in held_tickers} — keeping open")
 
         except Exception as exc:
             print(f"[reconcile] {market_id}: error — {exc}")
