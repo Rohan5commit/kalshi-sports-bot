@@ -457,7 +457,7 @@ def nightly_retrain():
 
 @app.function(
     image=image, secrets=secrets,
-    schedule=modal.Cron("0 6 * * *"), timeout=300,
+    schedule=modal.Cron("30 21 * * *"), timeout=300,
 )
 def send_daily_email():
     run_date = datetime.utcnow().date()
