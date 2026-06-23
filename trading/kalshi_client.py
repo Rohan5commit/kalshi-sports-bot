@@ -145,13 +145,16 @@ def get_market_orderbook(market_ticker: str) -> Optional[dict]:
 
 
 def get_yes_price_cents(market: dict) -> int:
-    """Return the yes ask price in integer cents (1-99), handling all known field formats."""
+    """Return the yes ask price in integer cents (1-99), or 0 if illiquid/invalid."""
     # Current format: yes_ask_dollars (string USD, e.g. "0.5600")
     for key in ("yes_ask_dollars", "last_price_dollars"):
         val = market.get(key)
-        if val:
+        if val is not None:
             try:
-                cents = round(float(val) * 100)
+                f = float(val)
+                if f <= 0 or f >= 1:
+                    return 0  # illiquid: no ask or fully one-sided
+                cents = round(f * 100)
                 if 1 <= cents <= 99:
                     return cents
             except (ValueError, TypeError):
@@ -159,14 +162,14 @@ def get_yes_price_cents(market: dict) -> int:
     # Legacy format: yes_ask or yes_price (integer cents)
     for key in ("yes_ask", "yes_price"):
         val = market.get(key)
-        if val:
+        if val is not None:
             try:
                 cents = int(val)
                 if 1 <= cents <= 99:
                     return cents
             except (ValueError, TypeError):
                 pass
-    return 50
+    return 0  # no valid ask — treat as illiquid
 
 
 def get_implied_probability(market: dict) -> float:
