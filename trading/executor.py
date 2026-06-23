@@ -221,13 +221,15 @@ def execute_for_sport(
 
             side = kelly_result["side"]
             bet_size = kelly_result["bet_size_usd"]
-            n_contracts = usd_to_contracts(bet_size, kalshi_yes_price if side == "yes" else 100 - kalshi_yes_price)
+            # place_order handles yes/no conversion internally; always pass kalshi_yes_price
+            price_for_sizing = kalshi_yes_price if side == "yes" else 100 - kalshi_yes_price
+            n_contracts = usd_to_contracts(bet_size, price_for_sizing)
 
             order_result = place_order(
                 market_ticker=market.get("ticker", ""),
                 side=side,
                 count=n_contracts,
-                price=kalshi_yes_price if side == "yes" else 100 - kalshi_yes_price,
+                price=kalshi_yes_price,
             )
 
             if order_result is not None:
@@ -236,7 +238,7 @@ def execute_for_sport(
                     kalshi_market_id=market.get("ticker", ""),
                     side=side,
                     bet_size_usd=bet_size,
-                    kalshi_price=float(kalshi_yes_price if side == "yes" else 100 - kalshi_yes_price),
+                    kalshi_price=float(price_for_sizing),
                     status="open",
                 )
                 summary["bets_placed"] += 1
