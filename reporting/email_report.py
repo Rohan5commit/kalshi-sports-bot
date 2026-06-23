@@ -36,19 +36,19 @@ def _get_dropped_rows_summary(run_date: date) -> dict:
         return {}
 
 
+BASELINE_BANKROLL = 606.0  # starting demo balance after bad-signal purge
+
 def _build_html(run_date: date) -> str:
     predictions = get_todays_predictions(run_date)
     trades = get_todays_trades(run_date)
     open_positions = get_open_trades()
     errors = get_todays_errors(run_date)
     threshold_events = get_todays_threshold_events(run_date)
-    dropped_summary = _get_dropped_rows_summary(run_date)
 
     pnl = compute_pnl(trades)
+    pnl_pct = (pnl / BASELINE_BANKROLL) * 100
     bets = [t for t in trades]
-    skipped = [p for p in predictions if p["decision"].startswith("skip")]
     sports_covered = list({p["sport"] for p in predictions})
-    total_dropped = sum(dropped_summary.values())
     pnl_class = "pnl-pos" if pnl >= 0 else "pnl-neg"
 
     html = f"""<!DOCTYPE html>
@@ -68,8 +68,6 @@ def _build_html(run_date: date) -> str:
   .stat-label {{ font-size: 11px; color: #555; margin-top: 4px; }}
   .pnl-pos {{ color: #2e7d32; font-weight: bold; }}
   .pnl-neg {{ color: #c62828; font-weight: bold; }}
-  .dq-ok {{ color: #2e7d32; }}
-  .dq-warn {{ color: #f57c00; font-weight: bold; }}
   pre {{ background: #f5f5f5; padding: 10px; border-radius: 4px; font-size: 11px; overflow-x: auto; }}
 </style>
 </head>
@@ -79,9 +77,9 @@ def _build_html(run_date: date) -> str:
 
 <div style="margin-top:16px;">
   <div class="stat-box"><div class="stat-val">{len(bets)}</div><div class="stat-label">Trades Placed</div></div>
-  <div class="stat-box"><div class="stat-val">{len(skipped)}</div><div class="stat-label">Skipped</div></div>
   <div class="stat-box"><div class="stat-val">{len(open_positions)}</div><div class="stat-label">Open Positions</div></div>
   <div class="stat-box"><div class="stat-val {pnl_class}">{_fmt_usd(pnl)}</div><div class="stat-label">Demo P&amp;L</div></div>
+  <div class="stat-box"><div class="stat-val {pnl_class}">{pnl_pct:+.2f}%</div><div class="stat-label">Return (vs $606 base)</div></div>
 </div>
 """
 
@@ -100,22 +98,6 @@ def _build_html(run_date: date) -> str:
     else:
         html += "<p><em>No trades placed today.</em></p>"
 
-    html += "<h2>Evaluated but Skipped</h2>"
-    if skipped:
-        html += "<table><tr><th>Sport</th><th>Matchup</th><th>Model Prob</th><th>Kalshi Implied</th><th>Edge</th><th>Reason</th></tr>"
-        for p in skipped:
-            reason_map = {"skip_no_market": "No Kalshi market", "skip": "Low edge / abstention"}
-            reason = reason_map.get(p.get("decision", "skip"), p.get("decision", ""))
-            html += (f"<tr><td>{p.get('sport','')}</td>"
-                     f"<td>{p.get('home_team','')} vs {p.get('away_team','')}</td>"
-                     f"<td>{_fmt_pct(p.get('final_prob', 0))}</td>"
-                     f"<td>{_fmt_pct(p.get('kalshi_implied', 0))}</td>"
-                     f"<td>{_fmt_pct(p.get('edge', 0))}</td>"
-                     f"<td>{reason}</td></tr>")
-        html += "</table>"
-    else:
-        html += "<p><em>No skipped markets today.</em></p>"
-
     html += "<h2>Open Positions</h2>"
     if open_positions:
         html += "<table><tr><th>Sport</th><th>Matchup</th><th>Market ID</th><th>Side</th><th>Stake</th></tr>"
@@ -130,22 +112,7 @@ def _build_html(run_date: date) -> str:
         html += "<p><em>No open positions.</em></p>"
 
     pnl_class2 = "pnl-pos" if pnl >= 0 else "pnl-neg"
-    html += f"<h2>Running Demo P&amp;L</h2><p class='{pnl_class2}' style='font-size:20px;'>{_fmt_usd(pnl)}</p>"
-
-    # ── Data Quality section ───────────────────────────────────────────────────
-    html += "<h2>Data Quality</h2>"
-    dq_class = "dq-warn" if total_dropped > 0 else "dq-ok"
-    html += (f"<p class='{dq_class}'><strong>Dropped rows today: {total_dropped}</strong></p>")
-    if dropped_summary:
-        html += "<table><tr><th>Failed Check</th><th>Rows Dropped</th></tr>"
-        for check, count in sorted(dropped_summary.items(), key=lambda x: -x[1]):
-            html += f"<tr><td>{check}</td><td>{count}</td></tr>"
-        html += "</table>"
-        html += ("<p style='font-size:12px;color:#777;'>Rows are dropped when temporal "
-                 "sync rules are violated (lookahead bias prevention). "
-                 "Full audit in <code>dropped_rows</code> Supabase table.</p>")
-    else:
-        html += "<p class='dq-ok'>No rows dropped &mdash; all sync checks passed.</p>"
+    html += f"<h2>Running Demo P&amp;L</h2><p class='{pnl_class2}' style='font-size:20px;'>{_fmt_usd(pnl)} ({pnl_pct:+.2f}% vs $606 base)</p>"
 
     if threshold_events:
         html += "<h2>Threshold Adjustments</h2><ul>"
