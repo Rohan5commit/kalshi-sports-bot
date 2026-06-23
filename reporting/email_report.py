@@ -112,7 +112,7 @@ def _build_html(run_date: date) -> str:
         html += "<p><em>No open positions.</em></p>"
 
     pnl_class2 = "pnl-pos" if pnl >= 0 else "pnl-neg"
-    html += f"<h2>Running Demo P&amp;L</h2><p class='{pnl_class2}' style='font-size:20px;'>{_fmt_usd(pnl)} ({pnl_pct:+.2f}% vs $606 base)</p>"
+    html += f"<h2>Running Demo P&amp;L</h2><p class='{pnl_class2}' style='font-size:20px;'>{pnl_pct:+.2f}%</p>"
 
     if threshold_events:
         html += "<h2>Threshold Adjustments</h2><ul>"
