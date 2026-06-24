@@ -41,7 +41,9 @@ BASELINE_BANKROLL = 606.0  # starting demo balance after bad-signal purge
 def _build_html(run_date: date) -> str:
     predictions = get_todays_predictions(run_date)
     trades = get_todays_trades(run_date)
-    open_positions = get_open_trades()
+    all_open = get_open_trades()
+    # Only show positions that are actually filled and settled (won/lost), not resting orders
+    open_positions = [t for t in all_open if t.get("status") in ("won", "lost")]
     errors = get_todays_errors(run_date)
     threshold_events = get_todays_threshold_events(run_date)
 
@@ -77,7 +79,7 @@ def _build_html(run_date: date) -> str:
 
 <div style="margin-top:16px;">
   <div class="stat-box"><div class="stat-val">{len(bets)}</div><div class="stat-label">Trades Placed</div></div>
-  <div class="stat-box"><div class="stat-val">{len(open_positions)}</div><div class="stat-label">Open Positions</div></div>
+  <div class="stat-box"><div class="stat-val">{len(open_positions)}</div><div class="stat-label">Closed Positions</div></div>
   <div class="stat-box"><div class="stat-val {pnl_class}">{_fmt_usd(pnl)}</div><div class="stat-label">Demo P&amp;L</div></div>
   <div class="stat-box"><div class="stat-val {pnl_class}">{pnl_pct:+.2f}%</div><div class="stat-label">Return (vs $606 base)</div></div>
 </div>
@@ -98,18 +100,19 @@ def _build_html(run_date: date) -> str:
     else:
         html += "<p><em>No trades placed today.</em></p>"
 
-    html += "<h2>Open Positions</h2>"
+    html += "<h2>Closed Positions</h2>"
     if open_positions:
-        html += "<table><tr><th>Sport</th><th>Matchup</th><th>Market ID</th><th>Side</th><th>Stake</th></tr>"
+        html += "<table><tr><th>Sport</th><th>Matchup</th><th>Market ID</th><th>Side</th><th>Stake</th><th>Result</th></tr>"
         for pos in open_positions:
             html += (f"<tr><td>{pos.get('sport','')}</td>"
                      f"<td>{pos.get('home_team','')} vs {pos.get('away_team','')}</td>"
                      f"<td>{pos.get('kalshi_market_id','')}</td>"
                      f"<td>{pos.get('side','')}</td>"
-                     f"<td>{_fmt_usd(pos.get('bet_size_usd', 0))}</td></tr>")
+                     f"<td>{_fmt_usd(pos.get('bet_size_usd', 0))}</td>"
+                     f"<td>{pos.get('status','').upper()}</td></tr>")
         html += "</table>"
     else:
-        html += "<p><em>No open positions.</em></p>"
+        html += "<p><em>No closed positions today.</em></p>"
 
     pnl_class2 = "pnl-pos" if pnl >= 0 else "pnl-neg"
     html += f"<h2>Running Demo P&amp;L</h2><p class='{pnl_class2}' style='font-size:20px;'>{pnl_pct:+.2f}%</p>"
