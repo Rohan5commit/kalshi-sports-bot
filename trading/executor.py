@@ -126,6 +126,9 @@ def execute_for_sport(
     except Exception:
         bankroll = 1000.0
 
+    # Build set of market tickers already open/resting — don't double-bet same game
+    already_open = {t.get("kalshi_market_id") for t in get_open_trades()}
+
     for game in games:
         summary["games_evaluated"] += 1
         home_team = game.get("home_team", "")
@@ -173,6 +176,10 @@ def execute_for_sport(
                 continue
 
             market = kalshi_markets[0]
+            if market.get("ticker") in already_open:
+                print(f"  {home_team} vs {away_team}: skip (already have open order)")
+                summary["bets_skipped"] += 1
+                continue
             is_bundle = bool(market.get("_is_bundle"))
             kalshi_implied = get_implied_probability(market)
             kalshi_yes_price = get_yes_price_cents(market)
