@@ -23,7 +23,7 @@ from trading.kalshi_client import (
 from trading.kelly import compute_kelly_bet
 from db.supabase_client import (
     log_prediction, log_trade, log_threshold_event,
-    get_consecutive_dry_days,
+    get_consecutive_dry_days, get_open_trades,
 )
 
 
