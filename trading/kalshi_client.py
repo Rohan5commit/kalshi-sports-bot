@@ -13,7 +13,10 @@ from typing import Optional
 from config import KALSHI_DEMO_BASE, KALSHI_PROD_BASE, KALSHI_USE_DEMO, MAX_RETRIES, BACKOFF_BASE
 from db.supabase_client import log_error
 
-BASE_URL = KALSHI_DEMO_BASE if KALSHI_USE_DEMO else KALSHI_PROD_BASE
+# Public market data (prices, events, orderbooks) always uses production — real liquidity.
+# Authenticated trading (orders, portfolio) uses demo when KALSHI_USE_DEMO=True.
+MARKET_DATA_URL = KALSHI_PROD_BASE
+TRADING_URL = KALSHI_DEMO_BASE if KALSHI_USE_DEMO else KALSHI_PROD_BASE
 
 # Kalshi event series tickers for each sport's individual game markets
 _GAME_SERIES: dict = {
@@ -31,8 +34,8 @@ _SPORT_KALSHI_TERMS: dict = {
 
 
 def _public_request(method: str, endpoint: str, **kwargs) -> Optional[dict]:
-    """Public market data request — no auth required."""
-    url = f"{BASE_URL}{endpoint}"
+    """Public market data request — no auth required, always hits production for real prices."""
+    url = f"{MARKET_DATA_URL}{endpoint}"
     last_exc = None
     for attempt in range(MAX_RETRIES):
         try:
@@ -90,7 +93,7 @@ def _make_rsa_headers(method: str, endpoint: str) -> dict:
 
 def _authed_request(method: str, endpoint: str, **kwargs) -> Optional[dict]:
     """Authenticated request for trading endpoints using RSA-PSS signing."""
-    url = f"{BASE_URL}{endpoint}"
+    url = f"{TRADING_URL}{endpoint}"
     last_exc = None
     for attempt in range(MAX_RETRIES):
         try:
