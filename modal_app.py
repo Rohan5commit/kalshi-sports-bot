@@ -269,10 +269,12 @@ def _enrich_weather(sport: str, game_logs: list) -> list:
 def reconcile_open_trades():
     """
     For each open trade in Supabase:
-    - If market settled: mark won or lost based on result vs side
-    - If market active but we hold no position: order never filled, mark canceled
+    - If market settled/closed/finalized: mark won or lost based on result vs side
+    - If market active AND we have a position: keep open (order filled, awaiting settlement)
+    - If market active AND no position AND game already started (> 3h old): cancel (never filled)
+    - If market active AND no position AND game not started yet: keep open (GTC resting order)
     """
-    from trading.kalshi_client import _authed_request, get_open_positions
+    from trading.kalshi_client import _public_request, get_open_positions
     from db.supabase_client import get_open_trades, update_trade_status
 
     open_trades = get_open_trades()
@@ -280,7 +282,7 @@ def reconcile_open_trades():
         print("[reconcile] No open trades to reconcile")
         return
 
-    # Build map of market ticker -> contracts held (position_fp > 0 means filled)
+    # Build set of market tickers where we actually hold contracts (position_fp > 0)
     positions = get_open_positions()
     held_tickers = {
         p.get("market_id", p.get("ticker", ""))
@@ -288,6 +290,7 @@ def reconcile_open_trades():
         if float(p.get("position_fp", 0) or 0) != 0
     }
 
+    now_utc = datetime.utcnow()
     print(f"[reconcile] Checking {len(open_trades)} open trade(s), {len(held_tickers)} filled position(s)...")
     for trade in open_trades:
         trade_id = trade.get("id")
@@ -297,7 +300,8 @@ def reconcile_open_trades():
             continue
 
         try:
-            market_data = _authed_request("GET", f"/markets/{market_id}")
+            # Always fetch from prod public endpoint — demo has stale/missing settlement data
+            market_data = _public_request("GET", f"/markets/{market_id}")
             if market_data is None:
                 print(f"[reconcile] {market_id}: could not fetch — skipping")
                 continue
@@ -306,17 +310,45 @@ def reconcile_open_trades():
             status = market.get("status", "")
             result = market.get("result", "")
 
-            if status in ("settled", "closed") and result:
-                won = (side == "yes" and result == "yes") or (side == "no" and result == "no")
-                new_status = "won" if won else "lost"
-                update_trade_status(trade_id, new_status)
-                print(f"[reconcile] {market_id}: result={result} side={side} -> {new_status}")
-            elif status == "active" and market_id not in held_tickers:
-                # Order placed but position_fp==0 — order never filled
-                update_trade_status(trade_id, "canceled")
-                print(f"[reconcile] {market_id}: active, no contracts filled -> canceled")
-            else:
-                print(f"[reconcile] {market_id}: status={status} contracts_held={market_id in held_tickers} — keeping open")
+            # Settled/closed/finalized — resolve to won/lost
+            if status in ("settled", "closed", "finalized"):
+                if result:
+                    won = (side == "yes" and result == "yes") or (side == "no" and result == "no")
+                    new_status = "won" if won else "lost"
+                    update_trade_status(trade_id, new_status)
+                    print(f"[reconcile] {market_id}: result={result} side={side} -> {new_status}")
+                else:
+                    # Finalized but no result yet — mark won/lost based on held position
+                    # If we have a position, we won (contracts have value). Otherwise lost.
+                    if market_id in held_tickers:
+                        update_trade_status(trade_id, "won")
+                        print(f"[reconcile] {market_id}: {status} no-result but have position -> won")
+                    else:
+                        update_trade_status(trade_id, "lost")
+                        print(f"[reconcile] {market_id}: {status} no-result no position -> lost")
+                continue
+
+            if market_id in held_tickers:
+                # We hold contracts — order filled, keep open until settlement
+                print(f"[reconcile] {market_id}: active, position held — keeping open")
+                continue
+
+            # No position held. Only cancel if the game window has passed (3h grace).
+            # close_time tells us when the market stops accepting orders (game start).
+            close_time_str = market.get("close_time", "") or market.get("expiration_time", "")
+            if close_time_str:
+                try:
+                    close_time = datetime.fromisoformat(close_time_str.replace("Z", "+00:00")).replace(tzinfo=None)
+                    if now_utc < close_time + timedelta(hours=3):
+                        # Game hasn't started yet (or started very recently) — GTC order still valid
+                        print(f"[reconcile] {market_id}: active, no fill yet, game not started — keeping open")
+                        continue
+                except (ValueError, TypeError):
+                    pass
+
+            # Game window passed and still no fill — order will never fill
+            update_trade_status(trade_id, "canceled")
+            print(f"[reconcile] {market_id}: active, no contracts filled after game window -> canceled")
 
         except Exception as exc:
             print(f"[reconcile] {market_id}: error — {exc}")
