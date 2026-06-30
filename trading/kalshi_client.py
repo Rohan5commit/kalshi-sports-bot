@@ -416,7 +416,7 @@ def place_order(
     """
     # v2 API: side=bid means buy YES; side=ask means sell YES (≡ buy NO)
     api_side = "bid" if side == "yes" else "ask"
-    yes_price_dollars = str(round((price if side == "yes" else 100 - price) / 100.0, 4))
+    yes_price_dollars = f"{(price if side == 'yes' else 100 - price) / 100.0:.4f}"
     payload = {
         "ticker": market_ticker,
         "side": api_side,
