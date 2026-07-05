@@ -43,7 +43,7 @@ def _build_html(run_date: date) -> str:
     # P&L is never stale even if the scheduled reconcile failed or ran early.
     reconcile_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     try:
-        from modal_app import reconcile_open_trades
+        from trading.reconcile import reconcile_open_trades
         reconcile_open_trades()
         reconcile_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     except Exception:
