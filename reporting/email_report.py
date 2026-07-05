@@ -14,7 +14,7 @@ from config import (
     SMTP_DEFAULT_HOST, SMTP_DEFAULT_PORT,
 )
 from db.supabase_client import (
-    get_todays_predictions, get_todays_trades, get_open_trades,
+    get_todays_predictions, get_todays_trades, get_closed_trades,
     get_todays_errors, get_todays_threshold_events, log_error,
 )
 from trading.kelly import compute_pnl
@@ -41,13 +41,12 @@ BASELINE_BANKROLL = 606.0  # starting demo balance after bad-signal purge
 def _build_html(run_date: date) -> str:
     predictions = get_todays_predictions(run_date)
     trades = get_todays_trades(run_date)
-    all_open = get_open_trades()
-    # Only show positions that are actually filled and settled (won/lost), not resting orders
-    open_positions = [t for t in all_open if t.get("status") in ("won", "lost")]
+    closed_trades = get_closed_trades()   # all-time won/lost — for P&L and closed positions table
+    open_positions = closed_trades        # show all closed (won/lost) positions
     errors = get_todays_errors(run_date)
     threshold_events = get_todays_threshold_events(run_date)
 
-    pnl = compute_pnl(trades)
+    pnl = compute_pnl(closed_trades)
     pnl_pct = (pnl / BASELINE_BANKROLL) * 100
     bets = [t for t in trades]
     sports_covered = list({p["sport"] for p in predictions})
