@@ -197,6 +197,21 @@ def update_trade_status(trade_id: str, status: str):
     _retry(_update)
 
 
+def get_closed_trades() -> list:
+    """Return all trades with status won or lost, enriched with prediction data."""
+    def _query():
+        sb = _get_client()
+        trades = sb.table("trades").select("*").in_("status", ["won","lost"]).order("created_at", desc=True).execute()
+        result = []
+        for t in trades.data:
+            pred = sb.table("predictions").select("sport,home_team,away_team").eq("id", t["prediction_id"]).maybe_single().execute()
+            p = pred.data or {}
+            result.append({**t, "sport": p.get("sport"), "home_team": p.get("home_team"),
+                           "away_team": p.get("away_team")})
+        return result
+    return _retry(_query)
+
+
 def get_consecutive_dry_days() -> int:
     def _query():
         sb = _get_client()
