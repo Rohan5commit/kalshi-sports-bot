@@ -39,6 +39,16 @@ def _get_dropped_rows_summary(run_date: date) -> dict:
 BASELINE_BANKROLL = 606.0  # starting demo balance after bad-signal purge
 
 def _build_html(run_date: date) -> str:
+    # Always reconcile right before building the email — belt-and-suspenders so
+    # P&L is never stale even if the scheduled reconcile failed or ran early.
+    reconcile_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    try:
+        from modal_app import reconcile_open_trades
+        reconcile_open_trades()
+        reconcile_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        pass  # reconcile is best-effort; stale data is better than no email
+
     predictions = get_todays_predictions(run_date)
     trades = get_todays_trades(run_date)
     closed_trades = get_closed_trades()   # all-time won/lost — for P&L and closed positions table
@@ -134,6 +144,7 @@ def _build_html(run_date: date) -> str:
     else:
         html += "<p style='color:#2e7d32;'>No errors today.</p>"
 
+    html += f"<p style='color:#888;font-size:11px;margin-top:32px;border-top:1px solid #eee;padding-top:8px;'>Data reconciled at {reconcile_ts}</p>"
     html += "</body></html>"
     return html
 
