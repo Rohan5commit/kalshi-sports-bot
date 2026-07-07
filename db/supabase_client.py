@@ -213,21 +213,24 @@ def get_closed_trades() -> list:
 
 
 def get_consecutive_dry_days() -> int:
+    """Count consecutive days with no trades placed. Uses trades table (more reliable than predictions)."""
     def _query():
         sb = _get_client()
-        res = (sb.table("predictions")
-                 .select("game_date")
-                 .eq("decision", "bet")
-                 .order("game_date", desc=True)
+        # Use trades table — it writes even when predictions fail (e.g. during RLS issues)
+        res = (sb.table("trades")
+                 .select("created_at")
+                 .not_.in_("status", ["canceled"])
+                 .order("created_at", desc=True)
                  .limit(30)
                  .execute())
         return res.data
     rows = _retry(_query)
-    dates_with_bets = {r["game_date"] for r in rows}
+    # Extract just the date portion from created_at timestamps
+    dates_with_trades = {r["created_at"][:10] for r in rows if r.get("created_at")}
     today = datetime.utcnow().date()
     dry = 0
     d = today
-    while str(d) not in dates_with_bets:
+    while str(d) not in dates_with_trades:
         dry += 1
         d -= timedelta(days=1)
         if dry > 30:
