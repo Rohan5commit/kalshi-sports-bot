@@ -12,6 +12,7 @@ from typing import Optional
 from config import (
     REPORT_FROM_EMAIL, REPORT_TO_EMAIL, SPORTS,
     SMTP_DEFAULT_HOST, SMTP_DEFAULT_PORT,
+    BASELINE_BANKROLL, BASELINE_RESET_DATE,
 )
 from db.supabase_client import (
     get_todays_predictions, get_todays_trades, get_closed_trades,
@@ -36,8 +37,6 @@ def _get_dropped_rows_summary(run_date: date) -> dict:
         return {}
 
 
-BASELINE_BANKROLL = 606.0  # starting demo balance after bad-signal purge
-
 def _build_html(run_date: date) -> str:
     # Always reconcile right before building the email — belt-and-suspenders so
     # P&L is never stale even if the scheduled reconcile failed or ran early.
@@ -51,12 +50,16 @@ def _build_html(run_date: date) -> str:
 
     predictions = get_todays_predictions(run_date)
     trades = get_todays_trades(run_date)
-    closed_trades = get_closed_trades()   # all-time won/lost — for P&L and closed positions table
-    open_positions = closed_trades        # show all closed (won/lost) positions
+    closed_trades = get_closed_trades()   # all-time won/lost
+    # Only count trades closed on/after the reset date for P&L
+    from datetime import date as _date
+    reset_date = str(BASELINE_RESET_DATE)
+    pnl_trades = [t for t in closed_trades if (t.get("created_at") or "")[:10] >= reset_date]
+    open_positions = closed_trades        # show ALL closed positions in table
     errors = get_todays_errors(run_date)
     threshold_events = get_todays_threshold_events(run_date)
 
-    pnl = compute_pnl(closed_trades)
+    pnl = compute_pnl(pnl_trades)
     pnl_pct = (pnl / BASELINE_BANKROLL) * 100
     bets = [t for t in trades]
     sports_covered = list({p["sport"] for p in predictions})
