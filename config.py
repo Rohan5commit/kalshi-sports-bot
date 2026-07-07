@@ -30,6 +30,11 @@ SECRET_API_SPORTS = "api-sports-secret"
 SECRET_NEWS_API = "newsapi-secret"
 SECRET_KAGGLE = "kaggle-secret"
 
+# P&L baseline — update BASELINE_RESET_DATE to reset the performance counter.
+# Only trades closed ON OR AFTER this date count toward P&L and % return.
+BASELINE_BANKROLL = 304.01   # demo balance after losses through 2026-07-06
+BASELINE_RESET_DATE = "2026-07-07"  # trades before this date excluded from P&L
+
 # Email
 REPORT_FROM_EMAIL = "rohan.santhoshkumar1@gmail.com"
 REPORT_TO_EMAIL = "rohan.santhoshkumar1@gmail.com"
