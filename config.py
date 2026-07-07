@@ -1,16 +1,16 @@
 # config.py
 
 # Trading thresholds
-MIN_EDGE = 0.02
-ABSTENTION_BAND = (0.48, 0.52)
-KELLY_FRACTION = 0.75
-MAX_BET_USD = 50.0
-DAILY_TRADE_TARGET = (3, 7)
+MIN_EDGE = 0.05           # require 5%+ edge — filters out noise trades on 1-2% edges
+ABSTENTION_BAND = (0.45, 0.55)  # wider band: skip when model is uncertain
+KELLY_FRACTION = 0.25     # quarter-Kelly — conservative sizing to limit drawdown
+MAX_BET_USD = 25.0        # halved max bet — cap single-game exposure
+DAILY_TRADE_TARGET = (2, 5)
 
-# Auto-relax
+# Auto-relax — only kicks in after 3 truly dry days; relaxes less aggressively
 AUTO_RELAX_INCREMENT = 0.005
-AUTO_RELAX_CAP = 0.02
-DRY_DAY_THRESHOLD = 1
+AUTO_RELAX_CAP = 0.01     # max 1% relaxation total (was 2%)
+DRY_DAY_THRESHOLD = 3     # 3 dry days before any relaxation (was 1)
 
 # Model performance
 MIN_ACCURACY_14D = 0.52
