@@ -56,50 +56,22 @@ def _public_request(method: str, endpoint: str, **kwargs) -> Optional[dict]:
     return None
 
 
-def _make_rsa_headers(method: str, endpoint: str) -> dict:
-    """RSA-PSS signed headers for Kalshi production API."""
-    import base64 as _b64
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import padding
-    from cryptography.hazmat.backends import default_backend
-
-    key_id = os.environ.get("KALSHI_API_KEY_ID", "")
-    pem = os.environ.get("KALSHI_PRIVATE_KEY", "")
-    if not key_id or not pem:
-        return {"Content-Type": "application/json"}
-    if "\\n" in pem:
-        pem = pem.replace("\\n", "\n")
-    ts = str(int(time.time() * 1000))
-    # Kalshi requires the full path including /trade-api/v2 prefix in the signature
-    full_path = f"/trade-api/v2{endpoint}"
-    msg = (ts + method.upper() + full_path).encode("utf-8")
-    try:
-        private_key = serialization.load_pem_private_key(
-            pem.encode(), password=None, backend=default_backend()
-        )
-    except Exception as exc:
-        log_error(context="kalshi_client._make_rsa_headers", error_msg=str(exc), tb="")
-        return {"Content-Type": "application/json"}
-    sig = private_key.sign(
-        msg,
-        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
-        hashes.SHA256(),
-    )
+def _make_auth_headers() -> dict:
+    """Bearer token auth — the method that actually worked."""
+    api_key = os.environ.get("KALSHI_API_KEY", "")
     return {
-        "KALSHI-ACCESS-KEY": key_id,
-        "KALSHI-ACCESS-SIGNATURE": _b64.b64encode(sig).decode(),
-        "KALSHI-ACCESS-TIMESTAMP": ts,
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
 
 
 def _authed_request(method: str, endpoint: str, **kwargs) -> Optional[dict]:
-    """Authenticated request for trading endpoints using RSA-PSS signing."""
+    """Authenticated request for trading endpoints."""
     url = f"{TRADING_URL}{endpoint}"
     last_exc = None
     for attempt in range(MAX_RETRIES):
         try:
-            headers = _make_rsa_headers(method, endpoint)
+            headers = _make_auth_headers()
             resp = requests.request(method, url, headers=headers, timeout=20, **kwargs)
             if not resp.ok:
                 body = resp.text[:2000]
