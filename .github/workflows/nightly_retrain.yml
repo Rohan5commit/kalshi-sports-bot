@@ -1,0 +1,111 @@
+name: nightly_retrain
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
+      KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      KALSHI_USE_DEMO: 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements_daily.txt
+
+      - name: Restore models cache
+        uses: actions/cache@v4
+        with:
+          path: models_cache/
+          key: kalshi-models-${{ runner.os }}-v1
+
+      - name: Prepare models directory
+        run: mkdir -p models_cache
+
+      - name: Run nightly retrain
+        run: |
+          python3 - <<'PYEOF'
+          import sys
+          sys.path.insert(0, '.')
+          from datetime import datetime, timedelta
+          import traceback
+          from data.scrapers.espn import get_scoreboard
+          from models import xgboost_model, bayesian_model
+          from db.supabase_client import log_error, log_model_performance, get_resolved_games_since
+          from db.historical_store import upsert_game_logs, get_game_logs, upsert_elo_ratings
+          from data.features import compute_elo_series
+          from config import SPORTS, MIN_ACCURACY_14D, ROLLING_ACCURACY_WINDOW
+
+          run_date = datetime.utcnow().date()
+          yesterday = run_date - timedelta(days=1)
+          print(f"=== nightly_retrain {run_date} ===")
+
+          for sport in SPORTS:
+              try:
+                  completed = get_scoreboard(sport, game_date=yesterday)
+                  new_logs = [
+                      {
+                          "game_id": f"espn_{sport}_{g.get('game_id','')}_{yesterday}",
+                          "game_date": str(yesterday), "season": yesterday.year,
+                          "home_team": g.get("home_team",""), "away_team": g.get("away_team",""),
+                          "home_score": int(g.get("home_score",0)), "away_score": int(g.get("away_score",0)),
+                          "home_win": bool(g.get("home_winner",False)), "source": "espn",
+                      }
+                      for g in completed if g.get("completed", False)
+                  ]
+                  if new_logs:
+                      upsert_game_logs(sport, new_logs)
+                      print(f"[{sport}] upserted {len(new_logs)} new results")
+
+                  all_logs = get_game_logs(sport)
+                  xgb_m = xgboost_model.load_model(sport, "models_cache")
+                  bn_m = bayesian_model.load_model(sport, "models_cache")
+
+                  if xgb_m and bn_m and new_logs:
+                      xgb_m = xgboost_model.incremental_retrain(sport, new_logs, xgb_m)
+                      xgboost_model.save_model(sport, xgb_m, "models_cache")
+                      bn_m = bayesian_model.update_priors(bn_m, new_logs)
+                      bayesian_model.save_model(sport, bn_m, "models_cache")
+                      elos = compute_elo_series(all_logs)
+                      upsert_elo_ratings(sport, elos)
+
+                  since_date = run_date - timedelta(days=ROLLING_ACCURACY_WINDOW)
+                  history = get_resolved_games_since(sport, since_date)
+                  all_logs_recent = [g for g in get_game_logs(sport) if g.get("game_date","") >= str(since_date)]
+                  outcome_map = {f"{g.get('game_date','')}_{g.get('home_team','')}_{g.get('away_team','')}": bool(g.get("home_win",False)) for g in all_logs_recent}
+                  total=0; correct=0
+                  for r in history:
+                      key = f"{r.get('game_date','')}_{r.get('home_team','')}_{r.get('away_team','')}"
+                      if key in outcome_map:
+                          total+=1
+                          if ((r.get("final_prob") or 0.5)>=0.5)==outcome_map[key]: correct+=1
+                  accuracy = correct/total if total>0 else 0.5
+                  print(f"[{sport}] 14d accuracy: {accuracy:.3f} ({total} preds)")
+                  log_model_performance(run_date=run_date, sport=sport, accuracy_14d=accuracy, total_predictions=total, retrain_triggered=False)
+              except Exception as exc:
+                  log_error(context=f"nightly_retrain({sport})", error_msg=str(exc), tb=traceback.format_exc(), run_date=run_date)
+                  print(f"ERROR {sport}: {exc}")
+
+          print("nightly_retrain complete")
+          PYEOF
+
+      - name: Save models cache
+        uses: actions/cache@v4
+        with:
+          path: models_cache/
+          key: kalshi-models-${{ runner.os }}-v1
