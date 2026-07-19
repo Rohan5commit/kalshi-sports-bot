@@ -1,0 +1,59 @@
+name: send_daily_email
+
+on:
+  schedule:
+    - cron: '30 21 * * *'
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
+      KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      KALSHI_USE_DEMO: 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements_daily.txt
+
+      - name: Prepare models directory
+        run: mkdir -p models_cache
+
+      - name: Send daily email
+        run: |
+          python3 - <<'PYEOF'
+          import sys
+          sys.path.insert(0, '.')
+          from datetime import datetime
+          import traceback
+          from trading.reconcile import reconcile_open_trades
+          from reporting.email_report import send_daily_report
+          from db.supabase_client import log_error
+
+          run_date = datetime.utcnow().date()
+          print(f"=== send_daily_email {run_date} ===")
+
+          try:
+              reconcile_open_trades()
+          except Exception as exc:
+              log_error(context="send_daily_email.reconcile", error_msg=str(exc), tb=traceback.format_exc(), run_date=run_date)
+
+          try:
+              send_daily_report(run_date)
+              print("Email sent")
+          except Exception as exc:
+              log_error(context="send_daily_email", error_msg=str(exc), tb=traceback.format_exc(), run_date=run_date)
+              raise
+          PYEOF
