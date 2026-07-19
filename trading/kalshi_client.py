@@ -10,8 +10,10 @@ import traceback
 import requests
 from typing import Optional
 
-from config import KALSHI_DEMO_BASE, KALSHI_PROD_BASE, KALSHI_USE_DEMO, MAX_RETRIES, BACKOFF_BASE
+from config import KALSHI_DEMO_BASE, KALSHI_PROD_BASE, MAX_RETRIES, BACKOFF_BASE
 from db.supabase_client import log_error
+
+KALSHI_USE_DEMO = os.environ.get("KALSHI_USE_DEMO", "true").lower() == "true"
 
 # Public market data (prices, events, orderbooks) always uses production — real liquidity.
 # Authenticated trading (orders, portfolio) uses demo when KALSHI_USE_DEMO=True.
@@ -425,7 +427,7 @@ def place_order(
         "time_in_force": "good_till_canceled",
         "self_trade_prevention_type": "taker_at_cross",
     }
-    result = _authed_request("POST", "/portfolio/events/orders", json=payload)
+    result = _authed_request("POST", "/portfolio/orders", json=payload)
     if result is None:
         log_error(
             context=f"kalshi_client.place_order({market_ticker}, {side})",
