@@ -1,0 +1,81 @@
+name: morning_pipeline
+
+on:
+  schedule:
+    - cron: '0 14 * * *'
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
+      KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      KALSHI_USE_DEMO: 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements_daily.txt
+
+      - name: Restore models cache
+        uses: actions/cache@v4
+        with:
+          path: models_cache/
+          key: kalshi-models-${{ runner.os }}-v1
+
+      - name: Prepare models directory
+        run: mkdir -p models_cache
+
+      - name: Run morning pipeline
+        run: |
+          python3 - <<'PYEOF'
+          import sys
+          sys.path.insert(0, '.')
+          from datetime import datetime
+          import traceback
+          from trading.reconcile import reconcile_open_trades
+          from data.scrapers.espn import get_scoreboard
+          from trading.executor import execute_for_sport
+          from db.supabase_client import log_error
+          from config import SPORTS
+
+          run_date = datetime.utcnow().date()
+          print(f"=== morning_pipeline {run_date} ===")
+
+          try:
+              reconcile_open_trades()
+          except Exception as exc:
+              log_error(context="morning_pipeline.reconcile", error_msg=str(exc), tb=traceback.format_exc(), run_date=run_date)
+
+          for sport in SPORTS:
+              try:
+                  games = get_scoreboard(sport, game_date=run_date)
+                  upcoming = [g for g in games if not g.get("completed", False)]
+                  print(f"{sport}: {len(upcoming)} upcoming games")
+                  if not upcoming:
+                      continue
+                  summary = execute_for_sport(sport, upcoming, "models_cache", run_date)
+                  print(f"{sport}: placed={summary['bets_placed']}, skipped={summary['bets_skipped']}")
+              except Exception as exc:
+                  log_error(context=f"morning_pipeline({sport})", error_msg=str(exc), tb=traceback.format_exc(), run_date=run_date)
+                  print(f"ERROR {sport}: {exc}")
+
+          print("morning_pipeline complete")
+          PYEOF
+
+      - name: Save models cache
+        uses: actions/cache@v4
+        with:
+          path: models_cache/
+          key: kalshi-models-${{ runner.os }}-v1
