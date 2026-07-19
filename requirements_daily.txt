@@ -1,0 +1,11 @@
+xgboost>=2.0
+pgmpy>=0.1.24
+scikit-learn>=1.4
+numpy>=1.26.0
+pandas>=2.0
+requests>=2.31
+supabase>=2.0
+scipy>=1.12
+feedparser>=6.0
+rapidfuzz>=3.0
+cryptography>=41.0
