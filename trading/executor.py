@@ -111,13 +111,16 @@ def execute_for_sport(
 
     eff_min_edge = get_effective_min_edge()
     if eff_min_edge < MIN_EDGE:
-        log_threshold_event(
-            event_type="auto_relax",
-            old_value=MIN_EDGE,
-            new_value=eff_min_edge,
-            reason=f"No trades for {get_consecutive_dry_days()} consecutive days",
-            event_date=run_date,
-        )
+        try:
+            log_threshold_event(
+                event_type="auto_relax",
+                old_value=MIN_EDGE,
+                new_value=eff_min_edge,
+                reason=f"No trades for {get_consecutive_dry_days()} consecutive days",
+                event_date=run_date,
+            )
+        except Exception:
+            pass
 
     try:
         bankroll = get_balance()
@@ -264,3 +267,4 @@ def execute_for_sport(
             )
 
     return summary
+
