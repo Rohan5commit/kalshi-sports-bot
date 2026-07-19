@@ -62,7 +62,7 @@ jobs:
                   completed = get_scoreboard(sport, game_date=yesterday)
                   new_logs = [
                       {
-                          "game_id": f"espn_{sport}_{g.get('game_id','')}_{yesterday}",
+                          "game_id": f"espn_{sport}_{g.get('id','')}_{yesterday}",
                           "game_date": str(yesterday), "season": yesterday.year,
                           "home_team": g.get("home_team",""), "away_team": g.get("away_team",""),
                           "home_score": int(g.get("home_score",0)), "away_score": int(g.get("away_score",0)),
