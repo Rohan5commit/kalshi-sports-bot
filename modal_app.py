@@ -274,7 +274,7 @@ from trading.reconcile import reconcile_open_trades  # noqa: E402
 @app.function(
     image=image, secrets=secrets,
     volumes={VOLUME_PATH: model_volume},
-    schedule=modal.Cron("0 14 * * *"), timeout=1800,
+    timeout=1800,
 )
 def morning_pipeline():
     run_date = datetime.utcnow().date()
@@ -314,7 +314,7 @@ def morning_pipeline():
 @app.function(
     image=image, secrets=secrets,
     volumes={VOLUME_PATH: model_volume},
-    schedule=modal.Cron("0 4 * * *"), timeout=3600,
+    timeout=3600,
 )
 def nightly_retrain():
     run_date = datetime.utcnow().date()
@@ -404,7 +404,7 @@ def nightly_retrain():
 
 @app.function(
     image=image, secrets=secrets,
-    schedule=modal.Cron("30 21 * * *"), timeout=300,
+    timeout=300,
 )
 def send_daily_email():
     run_date = datetime.utcnow().date()
@@ -664,3 +664,4 @@ def initial_setup():
 @app.local_entrypoint()
 def main():
     print("Kalshi Sports Bot — run initial_setup once, then scheduled jobs take over")
+
