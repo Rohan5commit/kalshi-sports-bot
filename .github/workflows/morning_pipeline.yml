@@ -32,7 +32,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: models_cache/
-          key: kalshi-models-${{ runner.os }}-v1
+          key: kalshi-models-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            kalshi-models-${{ runner.os }}-
 
       - name: Prepare models directory
         run: mkdir -p models_cache
@@ -78,4 +80,4 @@ jobs:
         uses: actions/cache@v4
         with:
           path: models_cache/
-          key: kalshi-models-${{ runner.os }}-v1
+          key: kalshi-models-${{ runner.os }}-${{ github.run_id }}
