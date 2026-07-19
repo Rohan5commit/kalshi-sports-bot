@@ -93,7 +93,7 @@ def _build_html(run_date: date) -> str:
   <div class="stat-box"><div class="stat-val">{len(bets)}</div><div class="stat-label">Trades Placed</div></div>
   <div class="stat-box"><div class="stat-val">{len(open_positions)}</div><div class="stat-label">Closed Positions</div></div>
   <div class="stat-box"><div class="stat-val {pnl_class}">{_fmt_usd(pnl)}</div><div class="stat-label">Demo P&amp;L</div></div>
-  <div class="stat-box"><div class="stat-val {pnl_class}">{pnl_pct:+.2f}%</div><div class="stat-label">Return (vs $606 base)</div></div>
+  <div class="stat-box"><div class="stat-val {pnl_class}">{pnl_pct:+.2f}%</div><div class="stat-label">Return (vs ${BASELINE_BANKROLL:.0f} base)</div></div>
 </div>
 """
 
