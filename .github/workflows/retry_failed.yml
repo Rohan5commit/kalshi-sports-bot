@@ -1,0 +1,23 @@
+name: retry_failed
+
+on:
+  workflow_run:
+    workflows: ["morning_pipeline", "nightly_retrain"]
+    types: [completed]
+
+jobs:
+  retry:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait 30 minutes before retry
+        run: sleep 1800
+
+      - name: Retry failed workflow (attempt 1)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --method POST \
+            repos/${{ github.repository }}/actions/workflows/${{ github.event.workflow_run.workflow_id }}/dispatches \
+            --field ref=${{ github.event.workflow_run.head_branch }}
+          echo "Retry dispatched for ${{ github.event.workflow_run.name }}"
