@@ -1,0 +1,64 @@
+name: failure_alert
+
+on:
+  workflow_run:
+    workflows: ["morning_pipeline", "nightly_retrain", "send_daily_email"]
+    types: [completed]
+
+jobs:
+  alert:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+
+    env:
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Send failure alert
+        run: |
+          python3 - <<'PYEOF'
+          import os, smtplib
+          from email.mime.text import MIMEText
+          from email.mime.multipart import MIMEMultipart
+
+          workflow  = os.environ.get("WORKFLOW_NAME", "unknown")
+          run_url   = os.environ.get("RUN_URL", "")
+          run_date  = os.environ.get("RUN_DATE", "")
+
+          smtp_user     = os.environ["SMTP_USER"]
+          smtp_password = os.environ["SMTP_PASSWORD"]
+
+          subject = f"[ALERT] Kalshi Bot — {workflow} failed {run_date}"
+          body = f"""
+          <html><body>
+          <h2 style="color:#c62828;">Workflow Failed</h2>
+          <p><strong>Workflow:</strong> {workflow}</p>
+          <p><strong>Date:</strong> {run_date}</p>
+          <p><strong>Run:</strong> <a href="{run_url}">{run_url}</a></p>
+          <p>A retry has been automatically dispatched (if this was morning_pipeline or nightly_retrain).</p>
+          </body></html>
+          """
+
+          msg = MIMEMultipart("alternative")
+          msg["Subject"] = subject
+          msg["From"]    = smtp_user
+          msg["To"]      = smtp_user
+          msg.attach(MIMEText(body, "html"))
+
+          with smtplib.SMTP("smtp.gmail.com", 587) as s:
+              s.ehlo(); s.starttls()
+              s.login(smtp_user, smtp_password)
+              s.sendmail(smtp_user, [smtp_user], msg.as_string())
+          print(f"Alert sent: {subject}")
+          PYEOF
+        env:
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          RUN_DATE: ${{ github.event.workflow_run.run_started_at }}
