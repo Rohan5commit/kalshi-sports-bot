@@ -23,7 +23,7 @@ from trading.kalshi_client import (
 from trading.kelly import compute_kelly_bet
 from db.supabase_client import (
     log_prediction, log_trade, log_threshold_event,
-    get_consecutive_dry_days, get_open_trades,
+    get_consecutive_dry_days, get_open_trades, get_todays_threshold_events,
 )
 
 
@@ -112,13 +112,15 @@ def execute_for_sport(
     eff_min_edge = get_effective_min_edge()
     if eff_min_edge < MIN_EDGE:
         try:
-            log_threshold_event(
-                event_type="auto_relax",
-                old_value=MIN_EDGE,
-                new_value=eff_min_edge,
-                reason=f"No trades for {get_consecutive_dry_days()} consecutive days",
-                event_date=run_date,
-            )
+            existing = get_todays_threshold_events(run_date)
+            if not any(e.get("event_type") == "auto_relax" for e in existing):
+                log_threshold_event(
+                    event_type="auto_relax",
+                    old_value=MIN_EDGE,
+                    new_value=eff_min_edge,
+                    reason=f"No trades for {get_consecutive_dry_days()} consecutive days",
+                    event_date=run_date,
+                )
         except Exception:
             pass
 
