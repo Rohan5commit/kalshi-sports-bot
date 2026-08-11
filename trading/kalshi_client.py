@@ -412,21 +412,20 @@ def place_order(
     order_type: str = "limit",
 ) -> Optional[dict]:
     """Place a limit order on Kalshi v2 API.
-    side: "yes" or "no" (internally). "yes" → bid, "no" → ask at (1-price).
-    price: cents (1-99) internally; converted to dollar string for API.
+    side: "yes" or "no". price: integer cents (1-99).
+    Endpoint: POST /markets/{ticker}/orders (v2 create order endpoint).
     """
-    # v2 API: side=bid means buy YES; side=ask means sell YES (≡ buy NO)
-    api_side = "bid" if side == "yes" else "ask"
-    yes_price_dollars = f"{(price if side == 'yes' else 100 - price) / 100.0:.4f}"
+    # yes_price is always expressed as integer cents from the YES perspective
+    yes_price = price if side == "yes" else 100 - price
     payload = {
-        "ticker": market_ticker,
-        "side": api_side,
-        "count": str(count),
-        "price": yes_price_dollars,
-        "time_in_force": "good_till_canceled",
-        "self_trade_prevention_type": "taker_at_cross",
+        "action": "buy",
+        "type": "limit",
+        "yes_price": yes_price,
+        "count": count,
+        "client_order_id": f"{market_ticker}-{side}-{yes_price}-{count}",
     }
-    result = _authed_request("POST", "/portfolio/orders", json=payload)
+    endpoint = f"/markets/{market_ticker}/orders"
+    result = _authed_request("POST", endpoint, json=payload)
     if result is None:
         log_error(
             context=f"kalshi_client.place_order({market_ticker}, {side})",
