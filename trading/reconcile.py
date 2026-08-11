@@ -25,7 +25,7 @@ def reconcile_open_trades():
     held_tickers = {
         p.get("market_id", p.get("ticker", ""))
         for p in positions
-        if float(p.get("position_fp", 0) or 0) != 0
+        if int(p.get("yes_position", 0) or 0) > 0 or int(p.get("no_position", 0) or 0) > 0
     }
 
     now_utc = datetime.utcnow()
