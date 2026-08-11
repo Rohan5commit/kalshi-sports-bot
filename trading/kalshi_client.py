@@ -415,14 +415,16 @@ def place_order(
     side: "yes" or "no". price: integer cents (1-99).
     Endpoint: POST /markets/{ticker}/orders (v2 create order endpoint).
     """
-    # yes_price is always expressed as integer cents from the YES perspective
-    yes_price = price if side == "yes" else 100 - price
+    if side == "yes":
+        price_field, price_val = "yes_price", price
+    else:
+        price_field, price_val = "no_price", price
     payload = {
         "action": "buy",
         "type": "limit",
-        "yes_price": yes_price,
+        price_field: price_val,
         "count": count,
-        "client_order_id": f"{market_ticker}-{side}-{yes_price}-{count}",
+        "client_order_id": f"{market_ticker}-{side}-{price_val}-{count}",
     }
     endpoint = f"/markets/{market_ticker}/orders"
     result = _authed_request("POST", endpoint, json=payload)
