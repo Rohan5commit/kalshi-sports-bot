@@ -2,6 +2,9 @@
 trading/executor.py — Full trade execution pipeline.
 Primary signal: Vegas moneyline (DraftKings via ESPN) converted to vig-removed probability.
 ML models used as secondary signal when Vegas odds unavailable.
+
+Paper trading mode: bets are simulated against live orderbook snapshots.
+No real orders are placed. Fills tracked in Supabase paper_trades table.
 """
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,12 +16,17 @@ import numpy as np
 from config import (
     MIN_EDGE, ABSTENTION_BAND, AUTO_RELAX_INCREMENT, AUTO_RELAX_CAP,
     DRY_DAY_THRESHOLD, SPORTS,
+    MAX_BET_PCT, MIN_BET_USD, LOSS_FLOOR_PCT, ORDERBOOK_DEPTH, PAPER_BANKROLL_START,
 )
 from data.features import build_features_for_game, features_to_vector, SPORT_FEATURES
 from models import xgboost_model, bayesian_model, meta_learner, calibration
 from trading.kalshi_client import (
     search_sports_markets, get_implied_probability, get_yes_price_cents,
-    get_balance, place_order, usd_to_contracts, parse_bundle_legs,
+    usd_to_contracts, parse_bundle_legs,
+)
+from trading.shadow_book import get_orderbook, simulate_fill, calc_fee
+from trading.paper_ledger import (
+    log_paper_trade, update_bankroll, get_bankroll as get_paper_bankroll, open_exposure,
 )
 from trading.kelly import compute_kelly_bet
 from db.supabase_client import (
@@ -89,13 +97,14 @@ def execute_for_sport(
     run_date: Optional[date] = None,
 ) -> dict:
     """
-    Run full prediction and trading pipeline for one sport.
+    Run full prediction and paper trading pipeline for one sport.
 
     Signal priority:
     1. Vegas moneyline (DraftKings via ESPN) — calibrated, real consensus probability
     2. ML models (XGBoost + BN) — used only when Vegas odds absent
 
     Edge = |vegas_prob - kalshi_implied|. We bet when Kalshi misprices vs Vegas.
+    Paper trading: fills are simulated against live orderbook; no real orders placed.
     """
     if run_date is None:
         run_date = datetime.utcnow().date()
@@ -124,12 +133,10 @@ def execute_for_sport(
         except Exception:
             pass
 
-    try:
-        bankroll = get_balance()
-        if bankroll <= 0:
-            bankroll = 1000.0
-    except Exception:
-        bankroll = 1000.0
+    # Use paper bankroll instead of live Kalshi balance
+    bankroll = get_paper_bankroll()
+    if bankroll <= 0:
+        bankroll = PAPER_BANKROLL_START
 
     # Build set of market tickers already open/resting — don't double-bet same game
     already_open = {t.get("kalshi_market_id") for t in get_open_trades()}
@@ -144,6 +151,7 @@ def execute_for_sport(
         away_abbr = game.get("away_abbr", "")
         game_id = game.get("id", "")
         vegas_home_prob = game.get("vegas_home_prob")  # vig-removed, from ESPN/DraftKings
+        game_label = f"{away_team} @ {home_team}"
 
         try:
             # Find Kalshi market
@@ -162,9 +170,10 @@ def execute_for_sport(
             xgb_prob = bn_prob = 0.5
             if vegas_home_prob is None:
                 summary["bets_skipped"] += 1
-                print(f"  {home_team} vs {away_team}: skip (no Vegas odds available)")
+                print(f"  {game_label}: skip (no Vegas odds available)")
                 continue
             final_prob = vegas_home_prob
+            model_prob = final_prob
             signal_source = f"vegas({vegas_home_prob:.3f})"
 
             if not kalshi_markets:
@@ -181,8 +190,10 @@ def execute_for_sport(
                 continue
 
             market = kalshi_markets[0]
-            if market.get("ticker") in already_open:
-                print(f"  {home_team} vs {away_team}: skip (already have open order)")
+            market_ticker = market.get("ticker", "")
+
+            if market_ticker in already_open:
+                print(f"  {game_label}: skip (already have open order)")
                 summary["bets_skipped"] += 1
                 continue
             is_bundle = bool(market.get("_is_bundle"))
@@ -215,7 +226,7 @@ def execute_for_sport(
                 "skip"
             )
             edge = kelly_result["edge"]
-            print(f"  {home_team} vs {away_team}: {signal_source} kalshi={kalshi_implied:.2f} edge={edge:+.3f} → {decision} ({kelly_result['reason']})")
+            print(f"  {game_label}: {signal_source} kalshi={kalshi_implied:.2f} edge={edge:+.3f} → {decision} ({kelly_result['reason']})")
 
             pred_id = log_prediction(
                 sport=sport, game_id=game_id,
@@ -233,28 +244,99 @@ def execute_for_sport(
 
             side = kelly_result["side"]
             bet_size = kelly_result["bet_size_usd"]
-            n_contracts = usd_to_contracts(bet_size, kalshi_yes_price if side == "yes" else 100 - kalshi_yes_price)
 
-            order_result = place_order(
-                market_ticker=market.get("ticker", ""),
+            # ── Paper fill pipeline ────────────────────────────────────────────
+
+            # 1. Check effective loss floor
+            exposure = open_exposure()
+            effective_bankroll = bankroll - exposure
+            loss_pct = (PAPER_BANKROLL_START - effective_bankroll) / PAPER_BANKROLL_START
+            if loss_pct >= LOSS_FLOOR_PCT:
+                print(f"  {game_label}: HALT — loss floor breached (effective=${effective_bankroll:.2f})")
+                summary["bets_skipped"] += 1
+                continue
+
+            # 2. Fetch live orderbook from production
+            book = get_orderbook(market_ticker, depth=ORDERBOOK_DEPTH, force_resync=True)
+            side_levels = book.get("yes_levels" if side == "yes" else "no_levels", [])
+
+            if not side_levels:
+                print(f"  {game_label}: skip — no orderbook depth for {market_ticker}")
+                summary["bets_skipped"] += 1
+                continue
+
+            ask_price = side_levels[0][0]  # best ask (ascending sort)
+
+            # 3. Phase 1 edge check with fee at best ask
+            fee_per = calc_fee(ask_price, 1)
+            net_edge_p1 = model_prob - ask_price - fee_per
+            if net_edge_p1 < eff_min_edge:
+                print(f"  {game_label}: skip — edge evaporated at ask (net={net_edge_p1:.4f})")
+                summary["bets_skipped"] += 1
+                continue
+
+            # 4. Compute contract count from kelly bet_size, cap at MAX_BET_PCT
+            max_bet_usd = MAX_BET_PCT * bankroll
+            capped_bet = min(bet_size, max_bet_usd)
+            count = max(1, int(capped_bet / ask_price))
+
+            # 5. Simulate fill
+            filled, avg_fill = simulate_fill(side_levels, count, ask_price)
+            if filled == 0:
+                print(f"  {game_label}: skip — zero fill simulated")
+                summary["bets_skipped"] += 1
+                continue
+
+            # 6. Phase 2 edge check at avg fill price
+            total_fee = calc_fee(avg_fill, filled)
+            net_edge_p2 = model_prob - avg_fill - calc_fee(avg_fill, 1)
+            if net_edge_p2 < eff_min_edge:
+                print(f"  {game_label}: skip — edge evaporated at fill (net={net_edge_p2:.4f}, avg={avg_fill:.4f})")
+                summary["bets_skipped"] += 1
+                continue
+
+            # 7. Check minimum bet
+            actual_bet_usd = filled * avg_fill
+            if actual_bet_usd < MIN_BET_USD:
+                print(f"  {game_label}: skip — below min bet (${actual_bet_usd:.2f})")
+                summary["bets_skipped"] += 1
+                continue
+
+            # 8. Book the paper fill
+            trade_id = log_paper_trade(
+                kalshi_market_id=market_ticker,
                 side=side,
-                count=n_contracts,
-                price=kalshi_yes_price if side == "yes" else 100 - kalshi_yes_price,
+                count=filled,
+                fill_price=avg_fill,
+                bet_usd=actual_bet_usd,
+                fee=total_fee,
+                model_prob=model_prob,
+                market_prob=ask_price,
+                net_edge=net_edge_p2,
+                sport=sport,
+                game_date=run_date,
+                home_team=game.get("home_team"),
+                away_team=game.get("away_team"),
+                run_date=run_date,
             )
 
-            if order_result is not None:
-                log_trade(
-                    prediction_id=pred_id,
-                    kalshi_market_id=market.get("ticker", ""),
-                    side=side,
-                    bet_size_usd=bet_size,
-                    kalshi_price=float(kalshi_yes_price if side == "yes" else 100 - kalshi_yes_price),
-                    status="open",
-                )
-                summary["bets_placed"] += 1
-                bankroll -= bet_size  # track running balance for Kelly sizing
-            else:
-                summary["bets_skipped"] += 1
+            # Also log to predictions/trades table for historical tracking
+            log_trade(
+                prediction_id=pred_id,
+                kalshi_market_id=market_ticker,
+                side=side,
+                bet_size_usd=actual_bet_usd,
+                kalshi_price=float(round(avg_fill * 100)),
+                status="open",
+            )
+
+            # 9. Debit bankroll
+            new_bankroll = bankroll - actual_bet_usd - total_fee
+            update_bankroll(new_bankroll)
+            bankroll = new_bankroll
+
+            print(f"  {game_label}: PAPER FILL {filled}x @ {avg_fill:.4f} | net_edge={net_edge_p2:.4f} | bet=${actual_bet_usd:.2f} fee=${total_fee:.4f} | id={trade_id[:8]}")
+            summary["bets_placed"] += 1
 
         except Exception as exc:
             err_msg = str(exc)
@@ -269,4 +351,3 @@ def execute_for_sport(
             )
 
     return summary
-
