@@ -41,10 +41,8 @@ REPORT_TO_EMAIL = "rohan.santhoshkumar1@gmail.com"
 SMTP_DEFAULT_HOST = "smtp.gmail.com"
 SMTP_DEFAULT_PORT = 587
 
-# Kalshi
-KALSHI_DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2"
+# Kalshi — production only (demo routing removed; paper trading handled in software layer)
 KALSHI_PROD_BASE = "https://api.elections.kalshi.com/trade-api/v2"
-KALSHI_USE_DEMO = True
 
 # ESPN
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
@@ -76,3 +74,11 @@ NFL_SEASONS = list(range(1999, 2026))
 MLB_SEASONS = list(range(2019, 2027))
 
 SPORT_SR_TYPE = {"NBA": "nba", "NFL": "nfl", "MLB": "mlb"}
+
+# Paper trading
+PAPER_TRADING = True
+PAPER_BANKROLL_START = 500.0
+MIN_BET_USD = 5.0
+MAX_BET_PCT = 0.05
+LOSS_FLOOR_PCT = 0.08
+ORDERBOOK_DEPTH = 20
