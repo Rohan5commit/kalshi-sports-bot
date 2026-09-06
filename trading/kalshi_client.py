@@ -10,15 +10,13 @@ import traceback
 import requests
 from typing import Optional
 
-from config import KALSHI_DEMO_BASE, KALSHI_PROD_BASE, MAX_RETRIES, BACKOFF_BASE
+from config import KALSHI_PROD_BASE, MAX_RETRIES, BACKOFF_BASE
 from db.supabase_client import log_error
 
-KALSHI_USE_DEMO = os.environ.get("KALSHI_USE_DEMO", "true").lower() == "true"
-
 # Public market data (prices, events, orderbooks) always uses production — real liquidity.
-# Authenticated trading (orders, portfolio) uses demo when KALSHI_USE_DEMO=True.
+# Authenticated requests (portfolio, orderbook with depth) also use production.
 MARKET_DATA_URL = KALSHI_PROD_BASE
-TRADING_URL = KALSHI_DEMO_BASE if KALSHI_USE_DEMO else KALSHI_PROD_BASE
+TRADING_URL = KALSHI_PROD_BASE
 
 # Kalshi event series tickers for each sport's individual game markets
 _GAME_SERIES: dict = {
@@ -93,7 +91,7 @@ def _make_auth_headers(method: str, endpoint: str) -> dict:
 
 
 def _authed_request(method: str, endpoint: str, **kwargs) -> Optional[dict]:
-    """Authenticated request for trading endpoints."""
+    """Authenticated request for trading/portfolio endpoints."""
     url = f"{TRADING_URL}{endpoint}"
     last_exc = None
     for attempt in range(MAX_RETRIES):
@@ -146,6 +144,16 @@ def get_market(market_ticker: str) -> Optional[dict]:
 def get_market_orderbook(market_ticker: str) -> Optional[dict]:
     """Fetch orderbook for precise implied probability."""
     return _public_request("GET", f"/markets/{market_ticker}/orderbook")
+
+
+def get_orderbook(ticker: str, depth: int = 20) -> dict:
+    """
+    Thin wrapper: fetch raw orderbook from Kalshi production API.
+    Returns the raw API response dict (or empty dict on failure).
+    Parsing is handled by shadow_book.py.
+    """
+    result = _authed_request("GET", f"/markets/{ticker}/orderbook?depth={depth}")
+    return result or {}
 
 
 def get_yes_price_cents(market: dict) -> int:
@@ -414,6 +422,7 @@ def place_order(
     """Place a limit order on Kalshi v2 API.
     side: "yes" or "no". price: integer cents (1-99).
     Endpoint: POST /markets/{ticker}/orders (v2 create order endpoint).
+    NOTE: In paper trading mode this is unused — executor.py uses paper fill pipeline instead.
     """
     if side == "yes":
         price_field, price_val = "yes_price", price
