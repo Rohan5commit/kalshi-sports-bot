@@ -138,8 +138,13 @@ def execute_for_sport(
     if bankroll <= 0:
         bankroll = PAPER_BANKROLL_START
 
-    # Build set of market tickers already open/resting — don't double-bet same game
-    already_open = {t.get("kalshi_market_id") for t in get_open_trades()}
+    # Build set of market tickers already open — don't double-bet same game
+    # Check both real trades table and paper trades table
+    from trading.paper_ledger import get_open_paper_trades
+    already_open = (
+        {t.get("kalshi_market_id") for t in get_open_trades()} |
+        {t.get("kalshi_market_id") for t in get_open_paper_trades()}
+    )
 
     for game in games:
         summary["games_evaluated"] += 1
@@ -358,4 +363,5 @@ def execute_for_sport(
             )
 
     return summary
+
 
