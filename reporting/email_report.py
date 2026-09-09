@@ -12,13 +12,11 @@ from typing import Optional
 from config import (
     REPORT_FROM_EMAIL, REPORT_TO_EMAIL, SPORTS,
     SMTP_DEFAULT_HOST, SMTP_DEFAULT_PORT,
-    BASELINE_BANKROLL, BASELINE_RESET_DATE,
+    PAPER_BANKROLL_START,
 )
 from db.supabase_client import (
-    get_todays_predictions, get_todays_trades, get_closed_trades,
-    get_todays_errors, get_todays_threshold_events, log_error,
+    get_todays_predictions, get_todays_errors, get_todays_threshold_events, log_error,
 )
-from trading.kelly import compute_pnl
 
 
 def _fmt_pct(val: float) -> str:
@@ -29,41 +27,54 @@ def _fmt_usd(val: float) -> str:
     return f"${val:.2f}"
 
 
-def _get_dropped_rows_summary(run_date: date) -> dict:
-    try:
-        from data.data_sync_validator import get_dropped_rows_summary
-        return get_dropped_rows_summary(run_date)
-    except Exception:
-        return {}
-
-
 def _build_html(run_date: date) -> str:
-    # Always reconcile right before building the email — belt-and-suspenders so
-    # P&L is never stale even if the scheduled reconcile failed or ran early.
     reconcile_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     try:
         from trading.reconcile import reconcile_open_trades
         reconcile_open_trades()
         reconcile_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     except Exception:
-        pass  # reconcile is best-effort; stale data is better than no email
+        pass
 
     predictions = get_todays_predictions(run_date)
-    trades = get_todays_trades(run_date)
-    closed_trades = get_closed_trades()   # all-time won/lost
-    # Only count trades closed on/after the reset date for P&L
-    from datetime import date as _date
-    reset_date = str(BASELINE_RESET_DATE)
-    pnl_trades = [t for t in closed_trades if (t.get("created_at") or "")[:10] >= reset_date]
-    open_positions = closed_trades        # show ALL closed positions in table
     errors = get_todays_errors(run_date)
     threshold_events = get_todays_threshold_events(run_date)
-
-    pnl = compute_pnl(pnl_trades)
-    pnl_pct = (pnl / BASELINE_BANKROLL) * 100
-    bets = [t for t in trades]
     sports_covered = list({p["sport"] for p in predictions})
-    pnl_class = "pnl-pos" if pnl >= 0 else "pnl-neg"
+
+    # Paper trading data
+    try:
+        from trading.paper_ledger import get_bankroll
+        from db.supabase_client import _get_client, _retry
+        bankroll = get_bankroll()
+
+        def _fetch_paper():
+            sb = _get_client()
+            return sb.table("paper_trades").select("*").order("created_at", desc=True).execute().data or []
+
+        def _fetch_today_paper():
+            sb = _get_client()
+            return sb.table("paper_trades").select("*").eq("run_date", str(run_date)).execute().data or []
+
+        all_paper_trades = _retry(_fetch_paper)
+        todays_paper_trades = _retry(_fetch_today_paper)
+
+        settled = [t for t in all_paper_trades if t.get("status") in ("won", "lost")]
+        total_pnl = sum(float(t.get("settlement_pnl") or 0) for t in settled)
+        wins = sum(1 for t in settled if t.get("status") == "won")
+        losses = sum(1 for t in settled if t.get("status") == "lost")
+        win_rate = wins / len(settled) if settled else 0.0
+        pnl_pct = (total_pnl / PAPER_BANKROLL_START) * 100
+    except Exception as exc:
+        bankroll = PAPER_BANKROLL_START
+        todays_paper_trades = []
+        all_paper_trades = []
+        settled = []
+        total_pnl = 0.0
+        wins = losses = 0
+        win_rate = 0.0
+        pnl_pct = 0.0
+
+    pnl_class = "pnl-pos" if total_pnl >= 0 else "pnl-neg"
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -77,57 +88,97 @@ def _build_html(run_date: date) -> str:
   th {{ background: #283593; color: white; padding: 8px 12px; text-align: left; font-size: 12px; }}
   td {{ padding: 7px 12px; border-bottom: 1px solid #e0e0e0; font-size: 13px; }}
   tr:nth-child(even) {{ background: #f5f5f5; }}
-  .stat-box {{ display: inline-block; background: #e8eaf6; border-radius: 8px; padding: 12px 20px; margin: 8px; text-align: center; }}
+  .stat-box {{ display: inline-block; background: #e8eaf6; border-radius: 8px; padding: 12px 20px; margin: 8px; text-align: center; min-width: 100px; }}
   .stat-val {{ font-size: 24px; font-weight: bold; color: #1a237e; }}
   .stat-label {{ font-size: 11px; color: #555; margin-top: 4px; }}
   .pnl-pos {{ color: #2e7d32; font-weight: bold; }}
   .pnl-neg {{ color: #c62828; font-weight: bold; }}
   pre {{ background: #f5f5f5; padding: 10px; border-radius: 4px; font-size: 11px; overflow-x: auto; }}
+  .paper-badge {{ background: #e3f2fd; color: #1565c0; font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: bold; }}
 </style>
 </head>
 <body>
-<h1>Kalshi Sports Bot - Daily Report</h1>
-<p><strong>Date:</strong> {run_date.strftime("%A, %B %d, %Y")} &nbsp;|&nbsp; <strong>Sports:</strong> {", ".join(sports_covered) or "None"}</p>
+<h1>Kalshi Sports Bot — Daily Report <span class="paper-badge">PAPER TRADING</span></h1>
+<p><strong>Date:</strong> {run_date.strftime("%A, %B %d, %Y")} &nbsp;|&nbsp;
+   <strong>Sports:</strong> {", ".join(sports_covered) or "None"} &nbsp;|&nbsp;
+   <strong>Bankroll:</strong> {_fmt_usd(bankroll)}</p>
 
 <div style="margin-top:16px;">
-  <div class="stat-box"><div class="stat-val">{len(bets)}</div><div class="stat-label">Trades Placed</div></div>
-  <div class="stat-box"><div class="stat-val">{len(open_positions)}</div><div class="stat-label">Closed Positions</div></div>
-  <div class="stat-box"><div class="stat-val {pnl_class}">{_fmt_usd(pnl)}</div><div class="stat-label">Demo P&amp;L</div></div>
-  <div class="stat-box"><div class="stat-val {pnl_class}">{pnl_pct:+.2f}%</div><div class="stat-label">Return (vs ${BASELINE_BANKROLL:.0f} base)</div></div>
+  <div class="stat-box"><div class="stat-val">{len(todays_paper_trades)}</div><div class="stat-label">Fills Today</div></div>
+  <div class="stat-box"><div class="stat-val">{len(settled)}</div><div class="stat-label">Settled All-Time</div></div>
+  <div class="stat-box"><div class="stat-val">{wins}W / {losses}L</div><div class="stat-label">Win / Loss</div></div>
+  <div class="stat-box"><div class="stat-val">{_fmt_pct(win_rate)}</div><div class="stat-label">Win Rate</div></div>
+  <div class="stat-box"><div class="stat-val class='{pnl_class}'">{_fmt_usd(total_pnl)}</div><div class="stat-label">Total P&amp;L</div></div>
+  <div class="stat-box"><div class="stat-val {pnl_class}">{pnl_pct:+.2f}%</div><div class="stat-label">Return (vs {_fmt_usd(PAPER_BANKROLL_START)})</div></div>
 </div>
 """
 
-    html += "<h2>Trades Placed</h2>"
-    if bets:
-        html += "<table><tr><th>Sport</th><th>Matchup</th><th>Side</th><th>Stake</th><th>Model Prob</th><th>Edge</th><th>Status</th></tr>"
-        for t in bets:
+    html += "<h2>Today's Paper Fills</h2>"
+    if todays_paper_trades:
+        html += ("<table><tr><th>Sport</th><th>Matchup</th><th>Side</th>"
+                 "<th>Contracts</th><th>Fill Price</th><th>Stake</th>"
+                 "<th>Edge</th><th>Status</th></tr>")
+        for t in todays_paper_trades:
+            away = t.get("away_team", "")
+            home = t.get("home_team", "")
+            matchup = f"{away} @ {home}" if away and home else t.get("kalshi_market_id", "")
+            status = t.get("status", "open")
+            pnl_str = ""
+            if status in ("won", "lost"):
+                pnl_val = float(t.get("settlement_pnl") or 0)
+                pnl_str = f" ({'+' if pnl_val >= 0 else ''}{pnl_val:.2f})"
             html += (f"<tr><td>{t.get('sport','')}</td>"
-                     f"<td>{t.get('home_team','')} vs {t.get('away_team','')}</td>"
+                     f"<td>{matchup}</td>"
                      f"<td>{t.get('side','').upper()}</td>"
-                     f"<td>{_fmt_usd(t.get('bet_size_usd', 0))}</td>"
-                     f"<td>{_fmt_pct(t.get('final_prob', 0))}</td>"
-                     f"<td>{_fmt_pct(t.get('edge', 0))}</td>"
-                     f"<td>{t.get('status','')}</td></tr>")
+                     f"<td>{t.get('count','')}</td>"
+                     f"<td>{float(t.get('fill_price',0)):.4f}</td>"
+                     f"<td>{_fmt_usd(float(t.get('bet_usd',0)))}</td>"
+                     f"<td>{_fmt_pct(float(t.get('net_edge',0)))}</td>"
+                     f"<td>{status.upper()}{pnl_str}</td></tr>")
         html += "</table>"
     else:
-        html += "<p><em>No trades placed today.</em></p>"
+        html += "<p><em>No paper fills today.</em></p>"
 
-    html += "<h2>Closed Positions</h2>"
-    if open_positions:
-        html += "<table><tr><th>Sport</th><th>Matchup</th><th>Market ID</th><th>Side</th><th>Stake</th><th>Result</th></tr>"
-        for pos in open_positions:
-            html += (f"<tr><td>{pos.get('sport','')}</td>"
-                     f"<td>{pos.get('home_team','')} vs {pos.get('away_team','')}</td>"
-                     f"<td>{pos.get('kalshi_market_id','')}</td>"
-                     f"<td>{pos.get('side','')}</td>"
-                     f"<td>{_fmt_usd(pos.get('bet_size_usd', 0))}</td>"
-                     f"<td>{pos.get('status','').upper()}</td></tr>")
+    html += "<h2>All Settled Positions</h2>"
+    if settled:
+        html += ("<table><tr><th>Date</th><th>Sport</th><th>Matchup</th><th>Side</th>"
+                 "<th>Fill Price</th><th>Stake</th><th>Result</th><th>P&amp;L</th></tr>")
+        for t in settled[-20:]:  # show last 20
+            away = t.get("away_team", "")
+            home = t.get("home_team", "")
+            matchup = f"{away} @ {home}" if away and home else t.get("kalshi_market_id", "")
+            pnl_val = float(t.get("settlement_pnl") or 0)
+            pnl_col = "pnl-pos" if pnl_val >= 0 else "pnl-neg"
+            html += (f"<tr><td>{str(t.get('run_date',''))[:10]}</td>"
+                     f"<td>{t.get('sport','')}</td>"
+                     f"<td>{matchup}</td>"
+                     f"<td>{t.get('side','').upper()}</td>"
+                     f"<td>{float(t.get('fill_price',0)):.4f}</td>"
+                     f"<td>{_fmt_usd(float(t.get('bet_usd',0)))}</td>"
+                     f"<td>{t.get('status','').upper()}</td>"
+                     f"<td class='{pnl_col}'>{'+' if pnl_val >= 0 else ''}{_fmt_usd(pnl_val)}</td></tr>")
         html += "</table>"
     else:
-        html += "<p><em>No closed positions today.</em></p>"
+        html += "<p><em>No settled positions yet.</em></p>"
 
-    pnl_class2 = "pnl-pos" if pnl >= 0 else "pnl-neg"
-    html += f"<h2>Running Demo P&amp;L</h2><p class='{pnl_class2}' style='font-size:20px;'>{pnl_pct:+.2f}%</p>"
+    html += "<h2>Today's Predictions</h2>"
+    if predictions:
+        html += "<table><tr><th>Sport</th><th>Matchup</th><th>Vegas Prob</th><th>Kalshi</th><th>Edge</th><th>Decision</th></tr>"
+        for p in predictions:
+            away = p.get("away_team", "")
+            home = p.get("home_team", "")
+            matchup = f"{away} @ {home}"
+            edge_val = float(p.get("edge") or 0)
+            edge_col = "pnl-pos" if edge_val > 0 else ""
+            html += (f"<tr><td>{p.get('sport','')}</td>"
+                     f"<td>{matchup}</td>"
+                     f"<td>{_fmt_pct(float(p.get('final_prob',0)))}</td>"
+                     f"<td>{_fmt_pct(float(p.get('kalshi_implied',0)))}</td>"
+                     f"<td class='{edge_col}'>{edge_val:+.3f}</td>"
+                     f"<td>{p.get('decision','')}</td></tr>")
+        html += "</table>"
+    else:
+        html += "<p><em>No predictions logged today.</em></p>"
 
     if threshold_events:
         html += "<h2>Threshold Adjustments</h2><ul>"
@@ -147,7 +198,7 @@ def _build_html(run_date: date) -> str:
     else:
         html += "<p style='color:#2e7d32;'>No errors today.</p>"
 
-    html += f"<p style='color:#888;font-size:11px;margin-top:32px;border-top:1px solid #eee;padding-top:8px;'>Data reconciled at {reconcile_ts}</p>"
+    html += f"<p style='color:#888;font-size:11px;margin-top:32px;border-top:1px solid #eee;padding-top:8px;'>Reconciled at {reconcile_ts}</p>"
     html += "</body></html>"
     return html
 
@@ -169,9 +220,9 @@ def send_daily_report(run_date: Optional[date] = None):
     smtp_password = os.environ["SMTP_PASSWORD"]
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"Kalshi Sports Bot Report — {run_date}"
-    msg["From"] = smtp_user
+    msg["Subject"] = f"Kalshi Sports Bot — {run_date} [Paper]"
     msg["To"] = REPORT_TO_EMAIL
+    msg["From"] = smtp_user
     msg.attach(MIMEText(html_body, "html"))
 
     try:
