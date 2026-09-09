@@ -1,7 +1,7 @@
 # config.py
 
 # Trading thresholds
-MIN_EDGE = 0.01           # require 5%+ edge — filters out noise trades on 1-2% edges
+MIN_EDGE = 0.01           # 1% minimum edge — auto-relaxes to 0.5% after dry days
 ABSTENTION_BAND = (0.48, 0.52)  # wider band: skip when model is uncertain
 KELLY_FRACTION = 0.25     # quarter-Kelly — conservative sizing to limit drawdown
 MAX_BET_USD = 25.0        # halved max bet — cap single-game exposure
@@ -82,3 +82,4 @@ MIN_BET_USD = 5.0
 MAX_BET_PCT = 0.05
 LOSS_FLOOR_PCT = 0.08
 ORDERBOOK_DEPTH = 20
+
