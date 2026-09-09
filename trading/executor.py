@@ -268,8 +268,12 @@ def execute_for_sport(
             ask_price = side_levels[0][0]  # best ask (ascending sort)
 
             # 3. Phase 1 edge check with fee at best ask
+            # Edge formula is side-aware: YES edge = model_prob - ask; NO edge = (1-model_prob) - ask
             fee_per = calc_fee(ask_price, 1)
-            net_edge_p1 = model_prob - ask_price - fee_per
+            if side == "yes":
+                net_edge_p1 = model_prob - ask_price - fee_per
+            else:
+                net_edge_p1 = (1.0 - model_prob) - ask_price - fee_per
             if net_edge_p1 < eff_min_edge:
                 print(f"  {game_label}: skip — edge evaporated at ask (net={net_edge_p1:.4f})")
                 summary["bets_skipped"] += 1
@@ -287,9 +291,12 @@ def execute_for_sport(
                 summary["bets_skipped"] += 1
                 continue
 
-            # 6. Phase 2 edge check at avg fill price
+            # 6. Phase 2 edge check at avg fill price (side-aware)
             total_fee = calc_fee(avg_fill, filled)
-            net_edge_p2 = model_prob - avg_fill - calc_fee(avg_fill, 1)
+            if side == "yes":
+                net_edge_p2 = model_prob - avg_fill - calc_fee(avg_fill, 1)
+            else:
+                net_edge_p2 = (1.0 - model_prob) - avg_fill - calc_fee(avg_fill, 1)
             if net_edge_p2 < eff_min_edge:
                 print(f"  {game_label}: skip — edge evaporated at fill (net={net_edge_p2:.4f}, avg={avg_fill:.4f})")
                 summary["bets_skipped"] += 1
@@ -351,3 +358,4 @@ def execute_for_sport(
             )
 
     return summary
+
