@@ -19,37 +19,46 @@ def compute_kelly_bet(
     """
     Compute the optimal bet size using fractional Kelly criterion.
 
+    Side logic: compare model_prob vs implied_prob to find which direction
+    has positive edge, regardless of whether model_prob is above or below 0.5.
+
     Args:
-        model_prob: calibrated probability that the home team wins (0–1)
-        kalshi_yes_price: Kalshi yes price in cents (e.g., 60 means $0.60/contract)
+        model_prob: calibrated probability that the YES outcome wins (0-1)
+        kalshi_yes_price: Kalshi yes price in cents (e.g., 60 means 0.60/contract)
         bankroll: available bankroll in USD
         min_edge: minimum edge required to place a bet
 
     Returns:
         dict with keys:
             should_bet (bool), bet_size_usd (float), edge (float),
-            side (str: 'yes'/'no'), reason (str)
+            side (str: yes/no), reason (str)
     """
     if kalshi_yes_price <= 0 or kalshi_yes_price >= 100:
         return {"should_bet": False, "bet_size_usd": 0.0, "edge": 0.0,
                 "side": "yes", "reason": "invalid_price"}
 
     implied_prob = kalshi_yes_price / 100.0
+    no_implied_prob = 1.0 - implied_prob
 
-    # Determine side: bet on YES if model says home wins, NO otherwise
-    if model_prob > 0.5:
+    yes_edge = model_prob - implied_prob
+    no_edge = (1.0 - model_prob) - no_implied_prob  # equiv: implied_prob - model_prob
+
+    # Pick the side with positive edge; if both negative, pick least-negative for reporting
+    if yes_edge >= no_edge:
         side = "yes"
+        edge = yes_edge
         p_win = model_prob
         p_lose = 1.0 - model_prob
-        odds = (100 - kalshi_yes_price) / kalshi_yes_price  # payout per $1 risked
-        edge = model_prob - implied_prob
+        # Payout per  risked on YES: win (1 - price) per contract
+        odds = (1.0 - implied_prob) / implied_prob
     else:
         side = "no"
+        edge = no_edge
+        no_price = 1.0 - implied_prob
         p_win = 1.0 - model_prob
         p_lose = model_prob
-        no_price = 100 - kalshi_yes_price
-        odds = (100 - no_price) / no_price
-        edge = (1.0 - model_prob) - (1.0 - implied_prob)
+        # Payout per  risked on NO
+        odds = implied_prob / no_price
 
     # Abstention band: skip if model output in uncertain zone
     if ABSTENTION_BAND[0] <= model_prob <= ABSTENTION_BAND[1]:
@@ -117,8 +126,8 @@ def compute_pnl(trades: list) -> float:
         if t.get("status") == "won":
             price = t.get("kalshi_price", 50) / 100.0
             size = t.get("bet_size_usd", 0.0)
-            payout = size / price  # total return
-            pnl += payout - size   # profit
+            payout = size / price
+            pnl += payout - size
         elif t.get("status") == "lost":
             pnl -= t.get("bet_size_usd", 0.0)
     return round(pnl, 2)
