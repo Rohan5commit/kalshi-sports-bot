@@ -25,12 +25,16 @@ def calc_fee(price: float, count: int) -> float:
     return round(fee_per * count, 4)
 
 
-def _parse_levels(raw: list) -> list:
+def _parse_levels(raw: list, dollar_amounts: bool = False) -> list:
     """
     Parse raw orderbook levels into (price, count) tuples.
-    Handles both [[price, count], ...] arrays and [{"price": x, "count": y}, ...] dicts.
+
+    Handles two entry formats:
+      - [price, count]     : price in dollars, count is contracts
+      - [price, dollars]   : price in dollars, second field is dollar volume
+                             (orderbook_fp format — convert: contracts = dollars / price)
+    Also handles dicts: {"price": x, "count": y}.
     Normalizes cents -> dollars if price > 1.0.
-    Rejects entries where price is outside (0, 1) after normalization.
     Returns levels sorted ascending by price (best ask first).
     """
     parsed = []
@@ -44,45 +48,51 @@ def _parse_levels(raw: list) -> list:
             continue
         try:
             p = float(p)
-            c = int(c)
+            raw_c = float(c)
         except (TypeError, ValueError):
             continue
         # Normalize cents to dollars
         if p > 1.0:
             p = p / 100.0
-        # Reject invalid prices
         if not (0 < p < 1):
             continue
-        if c <= 0:
+        # Convert dollar volume to contract count if needed
+        if dollar_amounts:
+            contracts = int(raw_c / p) if p > 0 else 0
+        else:
+            contracts = int(raw_c)
+        if contracts <= 0:
             continue
-        parsed.append((p, c))
+        parsed.append((p, contracts))
     parsed.sort(key=lambda x: x[0])
     return parsed
 
 
 def _extract_yes_no(raw: dict) -> tuple:
     """
-    Extract yes/no level lists from any known Kalshi orderbook response shape.
+    Extract (yes_list, no_list, dollar_amounts) from any known Kalshi orderbook shape.
 
     Known shapes:
-      1. {"orderbook": {"yes": [...], "no": [...]}}          — documented v2
-      2. {"yes": [...], "no": [...]}                         — flat v2
-      3. {"orderbook_fp": {"yes_dollars": [...], "no_dollars": [...]}}  — live production
+      1. {"orderbook_fp": {"yes_dollars": [...], "no_dollars": [...]}}
+         — live production (2026-09); second field is dollar volume, not contracts
+      2. {"orderbook": {"yes": [...], "no": [...]}}  — documented v2
+      3. {"yes": [...], "no": [...]}                 — flat v2
     """
-    # Shape 3: orderbook_fp (live production as of 2026-09)
+    # Shape 1: orderbook_fp — dollar amounts, must convert to contracts
     ob_fp = raw.get("orderbook_fp")
-    if ob_fp:
-        return ob_fp.get("yes_dollars", []), ob_fp.get("no_dollars", [])
+    if ob_fp is not None:
+        return ob_fp.get("yes_dollars", []), ob_fp.get("no_dollars", []), True
 
-    # Shape 1: nested orderbook key
+    # Shape 2: nested orderbook key — contract counts
     ob = raw.get("orderbook")
-    if ob:
-        return ob.get("yes", []), ob.get("no", [])
+    if ob is not None:
+        return ob.get("yes", []), ob.get("no", []), False
 
-    # Shape 2: flat dict
+    # Shape 3: flat dict — contract counts
     yes = raw.get("yes") or raw.get("yes_dollars", [])
     no = raw.get("no") or raw.get("no_dollars", [])
-    return yes, no
+    dollar_amounts = bool(raw.get("yes_dollars") or raw.get("no_dollars"))
+    return yes, no, dollar_amounts
 
 
 def get_orderbook(ticker: str, depth: int = 20, force_resync: bool = False) -> dict:
@@ -113,18 +123,17 @@ def get_orderbook(ticker: str, depth: int = 20, force_resync: bool = False) -> d
     raw = _authed_request("GET", f"/markets/{ticker}/orderbook?depth={depth}")
 
     if raw is None:
-        # Fetch failed — return stale cache if available, else empty dict
         if cached:
             stale = dict(cached)
             stale["stale"] = True
             return stale
         return {}
 
-    yes_raw, no_raw = _extract_yes_no(raw)
+    yes_raw, no_raw, dollar_amounts = _extract_yes_no(raw)
 
     result = {
-        "yes_levels": _parse_levels(yes_raw),
-        "no_levels": _parse_levels(no_raw),
+        "yes_levels": _parse_levels(yes_raw, dollar_amounts=dollar_amounts),
+        "no_levels": _parse_levels(no_raw, dollar_amounts=dollar_amounts),
         "last_sync": now,
         "stale": False,
     }
