@@ -60,6 +60,31 @@ def _parse_levels(raw: list) -> list:
     return parsed
 
 
+def _extract_yes_no(raw: dict) -> tuple:
+    """
+    Extract yes/no level lists from any known Kalshi orderbook response shape.
+
+    Known shapes:
+      1. {"orderbook": {"yes": [...], "no": [...]}}          — documented v2
+      2. {"yes": [...], "no": [...]}                         — flat v2
+      3. {"orderbook_fp": {"yes_dollars": [...], "no_dollars": [...]}}  — live production
+    """
+    # Shape 3: orderbook_fp (live production as of 2026-09)
+    ob_fp = raw.get("orderbook_fp")
+    if ob_fp:
+        return ob_fp.get("yes_dollars", []), ob_fp.get("no_dollars", [])
+
+    # Shape 1: nested orderbook key
+    ob = raw.get("orderbook")
+    if ob:
+        return ob.get("yes", []), ob.get("no", [])
+
+    # Shape 2: flat dict
+    yes = raw.get("yes") or raw.get("yes_dollars", [])
+    no = raw.get("no") or raw.get("no_dollars", [])
+    return yes, no
+
+
 def get_orderbook(ticker: str, depth: int = 20, force_resync: bool = False) -> dict:
     """
     Fetch and cache an order book for a given Kalshi market ticker.
@@ -77,7 +102,7 @@ def get_orderbook(ticker: str, depth: int = 20, force_resync: bool = False) -> d
     """
     now = time.time()
     cached = _SHADOW_CACHE.get(ticker)
-    
+
     # Use cache if fresh and no force resync
     if cached and not force_resync:
         age = now - cached.get("last_sync", 0)
@@ -86,7 +111,7 @@ def get_orderbook(ticker: str, depth: int = 20, force_resync: bool = False) -> d
 
     # Attempt live fetch
     raw = _authed_request("GET", f"/markets/{ticker}/orderbook?depth={depth}")
-    
+
     if raw is None:
         # Fetch failed — return stale cache if available, else empty dict
         if cached:
@@ -95,11 +120,7 @@ def get_orderbook(ticker: str, depth: int = 20, force_resync: bool = False) -> d
             return stale
         return {}
 
-    # Handle both response shapes:
-    # {"orderbook": {"yes": [...], "no": [...]}} or {"yes": [...], "no": [...]}
-    ob = raw.get("orderbook", raw)
-    yes_raw = ob.get("yes", [])
-    no_raw = ob.get("no", [])
+    yes_raw, no_raw = _extract_yes_no(raw)
 
     result = {
         "yes_levels": _parse_levels(yes_raw),
