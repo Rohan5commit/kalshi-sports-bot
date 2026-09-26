@@ -1,12 +1,12 @@
 """
 trading/kelly.py — Kelly criterion bet sizing for Kalshi prediction markets.
-Uses half-Kelly by default; applies abstention band and edge threshold guards.
+Uses quarter-Kelly by default; applies edge threshold guard only.
+Abstention band removed: we use Vegas consensus probability, not uncertain ML output.
 """
 from config import (
     KELLY_FRACTION,
     MAX_BET_USD,
     MIN_EDGE,
-    ABSTENTION_BAND,
 )
 
 
@@ -19,12 +19,12 @@ def compute_kelly_bet(
     """
     Compute the optimal bet size using fractional Kelly criterion.
 
-    Side logic: compare model_prob vs implied_prob to find which direction
-    has positive edge, regardless of whether model_prob is above or below 0.5.
+    Picks the side (YES or NO) with positive edge vs the Kalshi implied probability.
+    Since signal is Vegas consensus, near-50% games are equally valid — no abstention band.
 
     Args:
-        model_prob: calibrated probability that the YES outcome wins (0-1)
-        kalshi_yes_price: Kalshi yes price in cents (e.g., 60 means 0.60/contract)
+        model_prob: vig-removed Vegas probability that the YES outcome wins (0-1)
+        kalshi_yes_price: Kalshi yes price in cents (e.g., 60 means $0.60/contract)
         bankroll: available bankroll in USD
         min_edge: minimum edge required to place a bet
 
@@ -43,13 +43,12 @@ def compute_kelly_bet(
     yes_edge = model_prob - implied_prob
     no_edge = (1.0 - model_prob) - no_implied_prob  # equiv: implied_prob - model_prob
 
-    # Pick the side with positive edge; if both negative, pick least-negative for reporting
+    # Pick the side with positive edge
     if yes_edge >= no_edge:
         side = "yes"
         edge = yes_edge
         p_win = model_prob
         p_lose = 1.0 - model_prob
-        # Payout per  risked on YES: win (1 - price) per contract
         odds = (1.0 - implied_prob) / implied_prob
     else:
         side = "no"
@@ -57,18 +56,7 @@ def compute_kelly_bet(
         no_price = 1.0 - implied_prob
         p_win = 1.0 - model_prob
         p_lose = model_prob
-        # Payout per  risked on NO
         odds = implied_prob / no_price
-
-    # Abstention band: skip if model output in uncertain zone
-    if ABSTENTION_BAND[0] <= model_prob <= ABSTENTION_BAND[1]:
-        return {
-            "should_bet": False,
-            "bet_size_usd": 0.0,
-            "edge": edge,
-            "side": side,
-            "reason": f"abstention_band (model_prob={model_prob:.3f})",
-        }
 
     # Minimum edge filter
     if edge < min_edge:
