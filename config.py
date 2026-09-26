@@ -2,15 +2,14 @@
 
 # Trading thresholds
 MIN_EDGE = 0.01           # 1% minimum edge — auto-relaxes to 0.5% after dry days
-ABSTENTION_BAND = (0.48, 0.52)  # wider band: skip when model is uncertain
 KELLY_FRACTION = 0.25     # quarter-Kelly — conservative sizing to limit drawdown
-MAX_BET_USD = 25.0        # halved max bet — cap single-game exposure
+MAX_BET_USD = 25.0        # cap single-game exposure
 DAILY_TRADE_TARGET = (2, 5)
 
-# Auto-relax — only kicks in after 3 truly dry days; relaxes less aggressively
+# Auto-relax — kicks in after 1 dry day
 AUTO_RELAX_INCREMENT = 0.005
-AUTO_RELAX_CAP = 0.005     # max 1% relaxation total (was 2%)
-DRY_DAY_THRESHOLD = 1     # 3 dry days before any relaxation (was 1)
+AUTO_RELAX_CAP = 0.005
+DRY_DAY_THRESHOLD = 1
 
 # Model performance
 MIN_ACCURACY_14D = 0.52
@@ -30,10 +29,9 @@ SECRET_API_SPORTS = "api-sports-secret"
 SECRET_NEWS_API = "newsapi-secret"
 SECRET_KAGGLE = "kaggle-secret"
 
-# P&L baseline — update BASELINE_RESET_DATE to reset the performance counter.
-# Only trades closed ON OR AFTER this date count toward P&L and % return.
-BASELINE_BANKROLL = 304.01   # demo balance after losses through 2026-07-06
-BASELINE_RESET_DATE = "2026-07-07"  # trades before this date excluded from P&L
+# P&L baseline
+BASELINE_BANKROLL = 304.01
+BASELINE_RESET_DATE = "2026-07-07"
 
 # Email
 REPORT_FROM_EMAIL = "rohan.santhoshkumar1@gmail.com"
@@ -41,7 +39,7 @@ REPORT_TO_EMAIL = "rohan.santhoshkumar1@gmail.com"
 SMTP_DEFAULT_HOST = "smtp.gmail.com"
 SMTP_DEFAULT_PORT = 587
 
-# Kalshi — production only (demo routing removed; paper trading handled in software layer)
+# Kalshi — production only
 KALSHI_PROD_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
 # ESPN
@@ -65,12 +63,9 @@ ROTOWIRE_RSS_BASE = "https://www.rotowire.com/rss/news.php"
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
-# Historical data — full history ranges for initial load
-# NBA: 2022-23 season through 2025-26 (recent seasons for Kalshi overlap)
+# Historical data
 NBA_SEASONS = list(range(2022, 2026))
-# NFL: 1999 season through 2024
 NFL_SEASONS = list(range(1999, 2026))
-# MLB: 2019 through 2023 (5 seasons of Statcast — 9 seasons took ~5h, over budget)
 MLB_SEASONS = list(range(2019, 2027))
 
 SPORT_SR_TYPE = {"NBA": "nba", "NFL": "nfl", "MLB": "mlb"}
@@ -80,6 +75,4 @@ PAPER_TRADING = True
 PAPER_BANKROLL_START = 500.0
 MIN_BET_USD = 5.0
 MAX_BET_PCT = 0.05
-LOSS_FLOOR_PCT = 0.08
 ORDERBOOK_DEPTH = 20
-
