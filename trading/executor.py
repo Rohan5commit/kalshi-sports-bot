@@ -16,7 +16,7 @@ import numpy as np
 from config import (
     MIN_EDGE, ABSTENTION_BAND, AUTO_RELAX_INCREMENT, AUTO_RELAX_CAP,
     DRY_DAY_THRESHOLD, SPORTS,
-    MAX_BET_PCT, MIN_BET_USD, LOSS_FLOOR_PCT, ORDERBOOK_DEPTH, PAPER_BANKROLL_START,
+    MAX_BET_PCT, MIN_BET_USD, ORDERBOOK_DEPTH, PAPER_BANKROLL_START,
 )
 from data.features import build_features_for_game, features_to_vector, SPORT_FEATURES
 from models import xgboost_model, bayesian_model, meta_learner, calibration
@@ -26,7 +26,7 @@ from trading.kalshi_client import (
 )
 from trading.shadow_book import get_orderbook, simulate_fill, calc_fee
 from trading.paper_ledger import (
-    log_paper_trade, update_bankroll, get_bankroll as get_paper_bankroll, open_exposure,
+    log_paper_trade, update_bankroll, get_bankroll as get_paper_bankroll,
 )
 from trading.kelly import compute_kelly_bet
 from db.supabase_client import (
@@ -252,16 +252,7 @@ def execute_for_sport(
 
             # ── Paper fill pipeline ────────────────────────────────────────────
 
-            # 1. Check effective loss floor
-            exposure = open_exposure()
-            effective_bankroll = bankroll - exposure
-            loss_pct = (PAPER_BANKROLL_START - effective_bankroll) / PAPER_BANKROLL_START
-            if loss_pct >= LOSS_FLOOR_PCT:
-                print(f"  {game_label}: HALT — loss floor breached (effective=${effective_bankroll:.2f})")
-                summary["bets_skipped"] += 1
-                continue
-
-            # 2. Fetch live orderbook from production
+            # 1. Fetch live orderbook from production
             book = get_orderbook(market_ticker, depth=ORDERBOOK_DEPTH, force_resync=True)
             side_levels = book.get("yes_levels" if side == "yes" else "no_levels", [])
 
@@ -272,7 +263,7 @@ def execute_for_sport(
 
             ask_price = side_levels[0][0]  # best ask (ascending sort)
 
-            # 3. Phase 1 edge check with fee at best ask
+            # 2. Phase 1 edge check with fee at best ask
             # Edge formula is side-aware: YES edge = model_prob - ask; NO edge = (1-model_prob) - ask
             fee_per = calc_fee(ask_price, 1)
             if side == "yes":
@@ -284,19 +275,19 @@ def execute_for_sport(
                 summary["bets_skipped"] += 1
                 continue
 
-            # 4. Compute contract count from kelly bet_size, cap at MAX_BET_PCT
+            # 3. Compute contract count from kelly bet_size, cap at MAX_BET_PCT
             max_bet_usd = MAX_BET_PCT * bankroll
             capped_bet = min(bet_size, max_bet_usd)
             count = max(1, int(capped_bet / ask_price))
 
-            # 5. Simulate fill
+            # 4. Simulate fill
             filled, avg_fill = simulate_fill(side_levels, count, ask_price)
             if filled == 0:
                 print(f"  {game_label}: skip — zero fill simulated")
                 summary["bets_skipped"] += 1
                 continue
 
-            # 6. Phase 2 edge check at avg fill price (side-aware)
+            # 5. Phase 2 edge check at avg fill price (side-aware)
             total_fee = calc_fee(avg_fill, filled)
             if side == "yes":
                 net_edge_p2 = model_prob - avg_fill - calc_fee(avg_fill, 1)
@@ -307,14 +298,14 @@ def execute_for_sport(
                 summary["bets_skipped"] += 1
                 continue
 
-            # 7. Check minimum bet
+            # 6. Check minimum bet
             actual_bet_usd = filled * avg_fill
             if actual_bet_usd < MIN_BET_USD:
                 print(f"  {game_label}: skip — below min bet (${actual_bet_usd:.2f})")
                 summary["bets_skipped"] += 1
                 continue
 
-            # 8. Book the paper fill
+            # 7. Book the paper fill
             trade_id = log_paper_trade(
                 kalshi_market_id=market_ticker,
                 side=side,
@@ -342,7 +333,7 @@ def execute_for_sport(
                 status="open",
             )
 
-            # 9. Debit bankroll
+            # 8. Debit bankroll
             new_bankroll = bankroll - actual_bet_usd - total_fee
             update_bankroll(new_bankroll)
             bankroll = new_bankroll
@@ -363,5 +354,3 @@ def execute_for_sport(
             )
 
     return summary
-
-
